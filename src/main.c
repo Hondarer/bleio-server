@@ -3,6 +3,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "nvs_flash.h"
 #include "driver/gpio.h"
 
@@ -35,14 +36,63 @@ static const ble_uuid128_t gatt_svr_chr_read_uuid =
 #define CMD_SET_INPUT_PULLUP    2
 #define CMD_WRITE_LOW           10
 #define CMD_WRITE_HIGH          11
+#define CMD_BLINK_500MS         12
+#define CMD_BLINK_250MS         13
+
+// GPIO モード状態の定義
+typedef enum {
+    ESPIO_MODE_UNSET = 0,           // モード未設定 (初期状態)
+    ESPIO_MODE_INPUT,               // 入力モード
+    ESPIO_MODE_INPUT_PULLUP,        // 内部プルアップ抵抗付き入力モード
+    ESPIO_MODE_OUTPUT_LOW,          // LOW (0V) 出力モード
+    ESPIO_MODE_OUTPUT_HIGH,         // HIGH (3.3V) 出力モード
+    ESPIO_MODE_BLINK_250MS,         // 250ms 点滅出力モード
+    ESPIO_MODE_BLINK_500MS          // 500ms 点滅出力モード
+} espio_mode_state_t;
+
+// GPIO ごとの状態管理
+typedef struct {
+    espio_mode_state_t mode;       // 現在のモード
+    uint8_t current_level;         // 現在の出力レベル (点滅時に使用)
+    uint8_t blink_counter;         // 点滅用カウンタ (500ms 用)
+} espio_gpio_state_t;
 
 // グローバル変数
 static uint8_t gpio_read_pin = 0;
 static uint8_t gpio_read_state = 0;
 static uint16_t conn_handle = 0;
+static espio_gpio_state_t gpio_states[40] = {0};  // 全 GPIO の状態
+static esp_timer_handle_t blink_timer = NULL;
 
 // 関数の前方宣言
 static void ble_app_advertise(void);
+static bool is_valid_gpio(uint8_t pin);
+
+// 点滅タイマコールバック (250ms 周期)
+static void blink_timer_callback(void* arg) {
+    for (int pin = 0; pin < 40; pin++) {
+        if (!is_valid_gpio(pin)) {
+            continue;
+        }
+
+        espio_gpio_state_t *state = &gpio_states[pin];
+
+        if (state->mode == ESPIO_MODE_BLINK_250MS) {
+            // 250ms ごとにトグル
+            state->current_level = !state->current_level;
+            gpio_set_level(pin, state->current_level);
+        }
+        else if (state->mode == ESPIO_MODE_BLINK_500MS) {
+            // カウンタで 2 回に 1 回トグル
+            state->blink_counter++;
+            if (state->blink_counter >= 2) {
+                state->blink_counter = 0;
+                state->current_level = !state->current_level;
+                gpio_set_level(pin, state->current_level);
+            }
+        }
+    }
+}
 
 // GPIO 制御関数
 static bool is_valid_gpio(uint8_t pin) {
@@ -65,18 +115,33 @@ static esp_err_t gpio_set_mode(uint8_t pin, uint8_t command) {
     io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
     io_conf.pull_up_en = GPIO_PULLUP_DISABLE;
 
+    espio_gpio_state_t *state = &gpio_states[pin];
+
     switch (command) {
         case CMD_SET_INPUT:
             io_conf.mode = GPIO_MODE_INPUT;
+            gpio_config(&io_conf);
+            state->mode = ESPIO_MODE_INPUT;
             ESP_LOGI(TAG, "Set GPIO%d to INPUT", pin);
             break;
         case CMD_SET_OUTPUT:
             io_conf.mode = GPIO_MODE_OUTPUT;
-            ESP_LOGI(TAG, "Set GPIO%d to OUTPUT", pin);
+            gpio_config(&io_conf);
+            // 前回が HIGH なら HIGH を維持、それ以外は LOW にする
+            if (state->mode == ESPIO_MODE_OUTPUT_HIGH) {
+                gpio_set_level(pin, 1);
+                ESP_LOGI(TAG, "Set GPIO%d to OUTPUT (maintain HIGH)", pin);
+            } else {
+                gpio_set_level(pin, 0);
+                state->mode = ESPIO_MODE_OUTPUT_LOW;
+                ESP_LOGI(TAG, "Set GPIO%d to OUTPUT (set to LOW)", pin);
+            }
             break;
         case CMD_SET_INPUT_PULLUP:
             io_conf.mode = GPIO_MODE_INPUT;
             io_conf.pull_up_en = GPIO_PULLUP_ENABLE;
+            gpio_config(&io_conf);
+            state->mode = ESPIO_MODE_INPUT_PULLUP;
             ESP_LOGI(TAG, "Set GPIO%d to INPUT_PULLUP", pin);
             break;
         default:
@@ -84,7 +149,7 @@ static esp_err_t gpio_set_mode(uint8_t pin, uint8_t command) {
             return ESP_ERR_INVALID_ARG;
     }
 
-    return gpio_config(&io_conf);
+    return ESP_OK;
 }
 
 static esp_err_t gpio_write_level(uint8_t pin, uint8_t command) {
@@ -93,14 +158,18 @@ static esp_err_t gpio_write_level(uint8_t pin, uint8_t command) {
         return ESP_ERR_INVALID_ARG;
     }
 
+    espio_gpio_state_t *state = &gpio_states[pin];
     uint32_t level;
+
     switch (command) {
         case CMD_WRITE_LOW:
             level = 0;
+            state->mode = ESPIO_MODE_OUTPUT_LOW;
             ESP_LOGI(TAG, "Write GPIO%d to LOW", pin);
             break;
         case CMD_WRITE_HIGH:
             level = 1;
+            state->mode = ESPIO_MODE_OUTPUT_HIGH;
             ESP_LOGI(TAG, "Write GPIO%d to HIGH", pin);
             break;
         default:
@@ -109,6 +178,45 @@ static esp_err_t gpio_write_level(uint8_t pin, uint8_t command) {
     }
 
     return gpio_set_level(pin, level);
+}
+
+static esp_err_t gpio_start_blink(uint8_t pin, uint8_t command) {
+    if (!is_valid_gpio(pin)) {
+        ESP_LOGE(TAG, "Invalid GPIO pin: %d", pin);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    // GPIO を出力モードに設定
+    gpio_config_t io_conf = {};
+    io_conf.pin_bit_mask = (1ULL << pin);
+    io_conf.mode = GPIO_MODE_OUTPUT;
+    io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
+    io_conf.pull_up_en = GPIO_PULLUP_DISABLE;
+    gpio_config(&io_conf);
+
+    espio_gpio_state_t *state = &gpio_states[pin];
+
+    switch (command) {
+        case CMD_BLINK_250MS:
+            state->mode = ESPIO_MODE_BLINK_250MS;
+            state->current_level = 0;
+            state->blink_counter = 0;
+            gpio_set_level(pin, 0);
+            ESP_LOGI(TAG, "Start GPIO%d blinking at 250ms", pin);
+            break;
+        case CMD_BLINK_500MS:
+            state->mode = ESPIO_MODE_BLINK_500MS;
+            state->current_level = 0;
+            state->blink_counter = 0;
+            gpio_set_level(pin, 0);
+            ESP_LOGI(TAG, "Start GPIO%d blinking at 500ms", pin);
+            break;
+        default:
+            ESP_LOGE(TAG, "Invalid blink command: %d", command);
+            return ESP_ERR_INVALID_ARG;
+    }
+
+    return ESP_OK;
 }
 
 static esp_err_t gpio_read_level(uint8_t pin, uint8_t *state) {
@@ -150,6 +258,8 @@ static int gatt_svr_chr_write_cb(uint16_t conn_handle, uint16_t attr_handle,
         ret = gpio_set_mode(pin, command);
     } else if (command == CMD_WRITE_LOW || command == CMD_WRITE_HIGH) {
         ret = gpio_write_level(pin, command);
+    } else if (command == CMD_BLINK_500MS || command == CMD_BLINK_250MS) {
+        ret = gpio_start_blink(pin, command);
     } else {
         ESP_LOGE(TAG, "Unknown command: %d", command);
         return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
@@ -285,6 +395,15 @@ void app_main(void) {
         ret = nvs_flash_init();
     }
     ESP_ERROR_CHECK(ret);
+
+    // 点滅タイマの初期化 (250ms 周期)
+    const esp_timer_create_args_t blink_timer_args = {
+        .callback = &blink_timer_callback,
+        .name = "blink_timer"
+    };
+    ESP_ERROR_CHECK(esp_timer_create(&blink_timer_args, &blink_timer));
+    ESP_ERROR_CHECK(esp_timer_start_periodic(blink_timer, 250000));  // 250ms = 250000us
+    ESP_LOGI(TAG, "Blink timer started (250ms interval)");
 
     // NimBLE 初期化
     ESP_ERROR_CHECK(nimble_port_init());
