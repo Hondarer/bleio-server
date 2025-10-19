@@ -417,6 +417,33 @@ static void stop_pwm_if_active(uint8_t pin)
     }
 }
 
+static void stop_adc_if_active(uint8_t pin)
+{
+    portENTER_CRITICAL(&gpio_states_mux);
+    bleio_mode_state_t mode = gpio_states[pin].mode;
+    portEXIT_CRITICAL(&gpio_states_mux);
+
+    if (mode == BLEIO_MODE_ADC)
+    {
+        // キャリブレーションハンドルを削除
+        if (adc_configs[pin].cali_handle != NULL)
+        {
+            adc_cali_delete_scheme_line_fitting(adc_configs[pin].cali_handle);
+            adc_configs[pin].cali_handle = NULL;
+        }
+
+        // 設定をクリア
+        adc_configs[pin].channel = -1;
+        adc_configs[pin].calibrated = false;
+
+        portENTER_CRITICAL(&gpio_states_mux);
+        gpio_states[pin].mode = BLEIO_MODE_UNSET;
+        portEXIT_CRITICAL(&gpio_states_mux);
+
+        ESP_LOGI(TAG, "Stopped ADC on GPIO%d", pin);
+    }
+}
+
 static esp_err_t gpio_set_pwm(uint8_t pin, uint8_t duty_cycle, uint8_t freq_preset)
 {
     // パラメータ検証
@@ -431,6 +458,9 @@ static esp_err_t gpio_set_pwm(uint8_t pin, uint8_t duty_cycle, uint8_t freq_pres
         ESP_LOGE(TAG, "無効な周波数プリセット: %d (最大: %d)", freq_preset, PWM_FREQ_TABLE_SIZE - 1);
         return ESP_ERR_INVALID_ARG;
     }
+
+    // ADC が有効な場合は停止
+    stop_adc_if_active(pin);
 
     // 既存のモードをクリーンアップ
     portENTER_CRITICAL(&gpio_states_mux);
@@ -702,6 +732,9 @@ static esp_err_t gpio_set_mode(uint8_t pin, uint8_t command, uint8_t latch_mode)
     // PWM が有効な場合は停止
     stop_pwm_if_active(pin);
 
+    // ADC が有効な場合は停止
+    stop_adc_if_active(pin);
+
     gpio_config_t io_conf = {};
     io_conf.pin_bit_mask = (1ULL << pin);
     io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
@@ -790,6 +823,9 @@ static esp_err_t gpio_write_level(uint8_t pin, uint8_t command)
     // PWM が有効な場合は停止
     stop_pwm_if_active(pin);
 
+    // ADC が有効な場合は停止
+    stop_adc_if_active(pin);
+
     // GPIO を出力モードに設定
     gpio_config_t io_conf = {};
     io_conf.pin_bit_mask = (1ULL << pin);
@@ -836,6 +872,9 @@ static esp_err_t gpio_start_blink(uint8_t pin, uint8_t command)
 
     // PWM が有効な場合は停止
     stop_pwm_if_active(pin);
+
+    // ADC が有効な場合は停止
+    stop_adc_if_active(pin);
 
     // GPIO を出力モードに設定
     gpio_config_t io_conf = {};
@@ -1144,25 +1183,57 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
 // BLE アドバタイズ開始
 static void ble_app_advertise(void)
 {
-    struct ble_hs_adv_fields fields;
-    memset(&fields, 0, sizeof(fields));
+    // Advertising data: Flags + 128-bit Service UUID(s)
+    struct ble_hs_adv_fields adv;
+    memset(&adv, 0, sizeof(adv));
 
-    fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
-    fields.name = (uint8_t *)ble_svc_gap_device_name();
-    fields.name_len = strlen((char *)fields.name);
-    fields.name_is_complete = 1;
+    // 一般発見 + BR/EDR 非対応
+    adv.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
 
-    ble_gap_adv_set_fields(&fields);
+    // 128-bit サービス UUID を広告に載せる
+    adv.uuids128 = &gatt_svr_svc_uuid;
+    adv.num_uuids128 = 1; // 複数必要な場合は配列を用意して num_uuids128 を増やす。
+    adv.uuids128_is_complete = 1; // 完全リストとして扱う (必要に応じて 0 でも可)
 
+    int rc = ble_gap_adv_set_fields(&adv);
+    if (rc != 0)
+    {
+        ESP_LOGE(TAG, "ble_gap_adv_set_fields failed: rc=%d", rc);
+        return;
+    }
+
+    // Scan Response: デバイス名を応答する
+    struct ble_hs_adv_fields rsp;
+    memset(&rsp, 0, sizeof(rsp));
+    rsp.name = (uint8_t *)ble_svc_gap_device_name();
+    rsp.name_len = strlen((char *)rsp.name);
+    rsp.name_is_complete = 1;
+
+    rc = ble_gap_adv_rsp_set_fields(&rsp);
+    if (rc != 0)
+    {
+        ESP_LOGE(TAG, "ble_gap_adv_rsp_set_fields failed: rc=%d", rc);
+        return;
+    }
+
+    // アドバタイズ・パラメータ
     struct ble_gap_adv_params adv_params;
     memset(&adv_params, 0, sizeof(adv_params));
-    adv_params.conn_mode = BLE_GAP_CONN_MODE_UND;
-    adv_params.disc_mode = BLE_GAP_DISC_MODE_GEN;
+    adv_params.conn_mode = BLE_GAP_CONN_MODE_UND;         // 接続可
+    adv_params.disc_mode = BLE_GAP_DISC_MODE_GEN;         // 一般発見可能
     adv_params.itvl_min = BLE_GAP_ADV_FAST_INTERVAL1_MIN; // 30ms
     adv_params.itvl_max = BLE_GAP_ADV_FAST_INTERVAL1_MAX; // 60ms
 
-    ble_gap_adv_start(BLE_OWN_ADDR_PUBLIC, NULL, BLE_HS_FOREVER,
-                      &adv_params, ble_gap_event, NULL);
+    rc = ble_gap_adv_start(BLE_OWN_ADDR_PUBLIC, NULL, BLE_HS_FOREVER,
+                           &adv_params, ble_gap_event, NULL);
+    if (rc != 0)
+    {
+        ESP_LOGE(TAG, "ble_gap_adv_start failed: rc=%d", rc);
+    }
+    else
+    {
+        ESP_LOGI(TAG, "Advertising with 128-bit Service UUID");
+    }
 }
 
 // BLE 同期コールバック
