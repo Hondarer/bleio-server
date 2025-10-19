@@ -15,7 +15,7 @@
 #include "services/gap/ble_svc_gap.h"
 #include "services/gatt/ble_svc_gatt.h"
 
-static const char *TAG = "ESP32-GPIO";
+static const char *TAG = "BLEIO-ESP32";
 
 // サービスとキャラクタリスティックの UUID
 static const ble_uuid128_t gatt_svr_svc_uuid =
@@ -40,28 +40,31 @@ static const ble_uuid128_t gatt_svr_chr_read_uuid =
 #define CMD_BLINK_500MS             12
 #define CMD_BLINK_250MS             13
 
+// GPIO 最大数
+#define MAX_USABLE_GPIO             24  // 使用可能な GPIO の総数
+
 // GPIO モード状態の定義
 typedef enum {
-    ESPIO_MODE_UNSET = 0,           // モード未設定 (初期状態)
-    ESPIO_MODE_INPUT_FLOATING,      // ハイインピーダンス入力モード
-    ESPIO_MODE_INPUT_PULLUP,        // 内部プルアップ付き入力モード
-    ESPIO_MODE_INPUT_PULLDOWN,      // 内部プルダウン付き入力モード
-    ESPIO_MODE_OUTPUT_LOW,          // LOW (0V) 出力モード
-    ESPIO_MODE_OUTPUT_HIGH,         // HIGH (3.3V) 出力モード
-    ESPIO_MODE_BLINK_250MS,         // 250ms 点滅出力モード
-    ESPIO_MODE_BLINK_500MS          // 500ms 点滅出力モード
-} espio_mode_state_t;
+    BLEIO_MODE_UNSET = 0,           // モード未設定 (初期状態)
+    BLEIO_MODE_INPUT_FLOATING,      // ハイインピーダンス入力モード
+    BLEIO_MODE_INPUT_PULLUP,        // 内部プルアップ付き入力モード
+    BLEIO_MODE_INPUT_PULLDOWN,      // 内部プルダウン付き入力モード
+    BLEIO_MODE_OUTPUT_LOW,          // LOW (0V) 出力モード
+    BLEIO_MODE_OUTPUT_HIGH,         // HIGH (3.3V) 出力モード
+    BLEIO_MODE_BLINK_250MS,         // 250ms 点滅出力モード
+    BLEIO_MODE_BLINK_500MS          // 500ms 点滅出力モード
+} bleio_mode_state_t;
 
 // GPIO ごとの状態管理
 typedef struct {
-    espio_mode_state_t mode;       // 現在のモード
+    bleio_mode_state_t mode;       // 現在のモード
     uint8_t current_level;         // 現在の出力レベル (点滅時に使用)
     uint8_t blink_counter;         // 点滅用カウンタ (500ms 用)
-} espio_gpio_state_t;
+} bleio_gpio_state_t;
 
 // グローバル変数
 static uint16_t conn_handle = 0;
-static espio_gpio_state_t gpio_states[40] = {0};  // 全 GPIO の状態
+static bleio_gpio_state_t gpio_states[40] = {0};  // 全 GPIO の状態
 static esp_timer_handle_t blink_timer = NULL;
 
 // 関数の前方宣言
@@ -75,14 +78,14 @@ static void blink_timer_callback(void* arg) {
             continue;
         }
 
-        espio_gpio_state_t *state = &gpio_states[pin];
+        bleio_gpio_state_t *state = &gpio_states[pin];
 
-        if (state->mode == ESPIO_MODE_BLINK_250MS) {
+        if (state->mode == BLEIO_MODE_BLINK_250MS) {
             // 250ms ごとにトグル
             state->current_level = !state->current_level;
             gpio_set_level(pin, state->current_level);
         }
-        else if (state->mode == ESPIO_MODE_BLINK_500MS) {
+        else if (state->mode == BLEIO_MODE_BLINK_500MS) {
             // カウンタで 2 回に 1 回トグル
             state->blink_counter++;
             if (state->blink_counter >= 2) {
@@ -115,40 +118,40 @@ static esp_err_t gpio_set_mode(uint8_t pin, uint8_t command) {
     io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
     io_conf.pull_up_en = GPIO_PULLUP_DISABLE;
 
-    espio_gpio_state_t *state = &gpio_states[pin];
+    bleio_gpio_state_t *state = &gpio_states[pin];
 
     switch (command) {
         case CMD_SET_OUTPUT:
             io_conf.mode = GPIO_MODE_OUTPUT;
             gpio_config(&io_conf);
             // 前回が HIGH なら HIGH を維持、それ以外は LOW にする
-            if (state->mode == ESPIO_MODE_OUTPUT_HIGH) {
+            if (state->mode == BLEIO_MODE_OUTPUT_HIGH) {
                 gpio_set_level(pin, 1);
                 ESP_LOGI(TAG, "Set GPIO%d to OUTPUT (maintain HIGH)", pin);
             } else {
                 gpio_set_level(pin, 0);
-                state->mode = ESPIO_MODE_OUTPUT_LOW;
+                state->mode = BLEIO_MODE_OUTPUT_LOW;
                 ESP_LOGI(TAG, "Set GPIO%d to OUTPUT (set to LOW)", pin);
             }
             break;
         case CMD_SET_INPUT_FLOATING:
             io_conf.mode = GPIO_MODE_INPUT;
             gpio_config(&io_conf);
-            state->mode = ESPIO_MODE_INPUT_FLOATING;
+            state->mode = BLEIO_MODE_INPUT_FLOATING;
             ESP_LOGI(TAG, "Set GPIO%d to INPUT_FLOATING", pin);
             break;
         case CMD_SET_INPUT_PULLUP:
             io_conf.mode = GPIO_MODE_INPUT;
             io_conf.pull_up_en = GPIO_PULLUP_ENABLE;
             gpio_config(&io_conf);
-            state->mode = ESPIO_MODE_INPUT_PULLUP;
+            state->mode = BLEIO_MODE_INPUT_PULLUP;
             ESP_LOGI(TAG, "Set GPIO%d to INPUT_PULLUP", pin);
             break;
         case CMD_SET_INPUT_PULLDOWN:
             io_conf.mode = GPIO_MODE_INPUT;
             io_conf.pull_down_en = GPIO_PULLDOWN_ENABLE;
             gpio_config(&io_conf);
-            state->mode = ESPIO_MODE_INPUT_PULLDOWN;
+            state->mode = BLEIO_MODE_INPUT_PULLDOWN;
             ESP_LOGI(TAG, "Set GPIO%d to INPUT_PULLDOWN", pin);
             break;
         default:
@@ -173,18 +176,18 @@ static esp_err_t gpio_write_level(uint8_t pin, uint8_t command) {
     io_conf.pull_up_en = GPIO_PULLUP_DISABLE;
     gpio_config(&io_conf);
 
-    espio_gpio_state_t *state = &gpio_states[pin];
+    bleio_gpio_state_t *state = &gpio_states[pin];
     uint32_t level;
 
     switch (command) {
         case CMD_WRITE_LOW:
             level = 0;
-            state->mode = ESPIO_MODE_OUTPUT_LOW;
+            state->mode = BLEIO_MODE_OUTPUT_LOW;
             ESP_LOGI(TAG, "Write GPIO%d to LOW", pin);
             break;
         case CMD_WRITE_HIGH:
             level = 1;
-            state->mode = ESPIO_MODE_OUTPUT_HIGH;
+            state->mode = BLEIO_MODE_OUTPUT_HIGH;
             ESP_LOGI(TAG, "Write GPIO%d to HIGH", pin);
             break;
         default:
@@ -209,18 +212,18 @@ static esp_err_t gpio_start_blink(uint8_t pin, uint8_t command) {
     io_conf.pull_up_en = GPIO_PULLUP_DISABLE;
     gpio_config(&io_conf);
 
-    espio_gpio_state_t *state = &gpio_states[pin];
+    bleio_gpio_state_t *state = &gpio_states[pin];
 
     switch (command) {
         case CMD_BLINK_250MS:
-            state->mode = ESPIO_MODE_BLINK_250MS;
+            state->mode = BLEIO_MODE_BLINK_250MS;
             state->current_level = 0;
             state->blink_counter = 0;
             gpio_set_level(pin, 0);
             ESP_LOGI(TAG, "Start GPIO%d blinking at 250ms", pin);
             break;
         case CMD_BLINK_500MS:
-            state->mode = ESPIO_MODE_BLINK_500MS;
+            state->mode = BLEIO_MODE_BLINK_500MS;
             state->current_level = 0;
             state->blink_counter = 0;
             gpio_set_level(pin, 0);
@@ -299,7 +302,7 @@ static int gatt_svr_chr_read_cb(uint16_t conn_handle, uint16_t attr_handle,
                                 struct ble_gatt_access_ctxt *ctxt, void *arg) {
     if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) {
         // READ 操作: すべての入力モード設定済みピンの状態を返す
-        uint8_t buffer[123];  // 最大 1 (カウント) + 61 * 2 (ピン番号と状態) = 123 バイト
+        uint8_t buffer[1 + MAX_USABLE_GPIO * 2];  // 1 (カウント) + 24 * 2 (ピン番号と状態) = 49 バイト
         uint8_t count = 0;
 
         // すべての GPIO をスキャンして、入力モードのピンを収集
@@ -308,12 +311,12 @@ static int gatt_svr_chr_read_cb(uint16_t conn_handle, uint16_t attr_handle,
                 continue;
             }
 
-            espio_gpio_state_t *state = &gpio_states[pin];
+            bleio_gpio_state_t *state = &gpio_states[pin];
 
             // 入力モードかチェック
-            if (state->mode == ESPIO_MODE_INPUT_FLOATING ||
-                state->mode == ESPIO_MODE_INPUT_PULLUP ||
-                state->mode == ESPIO_MODE_INPUT_PULLDOWN) {
+            if (state->mode == BLEIO_MODE_INPUT_FLOATING ||
+                state->mode == BLEIO_MODE_INPUT_PULLUP ||
+                state->mode == BLEIO_MODE_INPUT_PULLDOWN) {
 
                 uint8_t level = gpio_get_level(pin);
                 buffer[1 + count * 2] = pin;
@@ -425,7 +428,7 @@ static void ble_host_task(void *param) {
 }
 
 void app_main(void) {
-    ESP_LOGI(TAG, "Starting ESP32 GPIO Control Service");
+    ESP_LOGI(TAG, "Starting BLEIO-ESP32 Service");
 
     // NVS 初期化
     esp_err_t ret = nvs_flash_init();
@@ -450,9 +453,9 @@ void app_main(void) {
     // GATT サービス初期化
     ble_hs_cfg.sync_cb = ble_app_on_sync;
 
-    // ATT MTU を 247 バイトに設定 (最大 61 コマンドまで送信可能)
+    // ATT MTU を 247 バイトに設定 (最大 24 コマンドまで送信可能)
     ble_att_set_preferred_mtu(247);
-    ESP_LOGI(TAG, "Set preferred MTU to 247 bytes");
+    ESP_LOGI(TAG, "Set preferred MTU to 247 bytes (max %d commands)", MAX_USABLE_GPIO);
 
     ble_svc_gap_init();
     ble_svc_gatt_init();
@@ -460,10 +463,10 @@ void app_main(void) {
     ble_gatts_add_svcs(gatt_svr_svcs);
 
     // デバイス名設定
-    ble_svc_gap_device_name_set("ESP32-GPIO");
+    ble_svc_gap_device_name_set("BLEIO");
 
     // BLE ホストタスク起動
     nimble_port_freertos_init(ble_host_task);
 
-    ESP_LOGI(TAG, "BLE initialization complete. Device name: ESP32-GPIO");
+    ESP_LOGI(TAG, "BLE initialization complete. Device name: BLEIO");
 }

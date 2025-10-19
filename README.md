@@ -1,8 +1,8 @@
-# espio-server
+# bleio-server
 
-espio-server は、ESP32 で動作する BLE (Bluetooth Low Energy) ベースの GPIO 制御ファームウェアです。
+bleio-server は、ESP32 で動作する BLE (Bluetooth Low Energy) ベースの GPIO 制御ファームウェアです。
 
-このプロジェクトは [espio](https://github.com/Hondarer/espio) のサブモジュールとして使用されます。
+このプロジェクトは [bleio](https://github.com/Hondarer/bleio) のサブモジュールとして使用されます。
 
 ## 概要
 
@@ -20,7 +20,7 @@ NimBLE スタックを使用した軽量な実装で、GATT サービスを公�
 
 **BLE 通信**
 
-- デバイス名: ESP32-GPIO
+- デバイス名: BLEIO-ESP32
 - サービス UUID: `4fafc201-1fb5-459e-8fcc-c5c9c333914b`
 - 書き込みキャラクタリスティック: `beb5483e-36e1-4688-b7f5-ea07361b26a8`
 - 読み取りキャラクタリスティック: `1c95d5e3-d8f7-413a-bf3d-7a2e5d7be87e`
@@ -78,7 +78,7 @@ server/
 
 ## プロトコル仕様
 
-詳細なプロトコル仕様は [espio の CLAUDE.md](https://github.com/Hondarer/espio/blob/main/CLAUDE.md) を参照してください。
+詳細なプロトコル仕様は [bleio の CLAUDE.md](https://github.com/Hondarer/bleio/blob/main/CLAUDE.md) を参照してください。
 
 **GPIO 書き込みキャラクタリスティック**
 
@@ -113,6 +113,6 @@ MIT ライセンスです。詳細は [LICENSE](LICENSE) ファイルを参照�
 
 ## 関連リンク
 
-- [espio (親プロジェクト)](https://github.com/Hondarer/espio)
+- [bleio (親プロジェクト)](https://github.com/Hondarer/bleio)
 - [ESP-IDF Programming Guide](https://docs.espressif.com/projects/esp-idf/en/latest/)
 - [NimBLE Documentation](https://mynewt.apache.org/latest/network/docs/index.html)
