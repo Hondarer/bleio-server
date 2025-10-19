@@ -31,19 +31,21 @@ static const ble_uuid128_t gatt_svr_chr_read_uuid =
                      0x3a, 0x41, 0xf7, 0xd8, 0xe3, 0xd5, 0x95, 0x1c);
 
 // GPIO コマンド定義
-#define CMD_SET_INPUT           0
-#define CMD_SET_OUTPUT          1
-#define CMD_SET_INPUT_PULLUP    2
-#define CMD_WRITE_LOW           10
-#define CMD_WRITE_HIGH          11
-#define CMD_BLINK_500MS         12
-#define CMD_BLINK_250MS         13
+#define CMD_SET_OUTPUT              0
+#define CMD_SET_INPUT_FLOATING      1
+#define CMD_SET_INPUT_PULLUP        2
+#define CMD_SET_INPUT_PULLDOWN      3
+#define CMD_WRITE_LOW               10
+#define CMD_WRITE_HIGH              11
+#define CMD_BLINK_500MS             12
+#define CMD_BLINK_250MS             13
 
 // GPIO モード状態の定義
 typedef enum {
     ESPIO_MODE_UNSET = 0,           // モード未設定 (初期状態)
-    ESPIO_MODE_INPUT,               // 入力モード
-    ESPIO_MODE_INPUT_PULLUP,        // 内部プルアップ抵抗付き入力モード
+    ESPIO_MODE_INPUT_FLOATING,      // ハイインピーダンス入力モード
+    ESPIO_MODE_INPUT_PULLUP,        // 内部プルアップ付き入力モード
+    ESPIO_MODE_INPUT_PULLDOWN,      // 内部プルダウン付き入力モード
     ESPIO_MODE_OUTPUT_LOW,          // LOW (0V) 出力モード
     ESPIO_MODE_OUTPUT_HIGH,         // HIGH (3.3V) 出力モード
     ESPIO_MODE_BLINK_250MS,         // 250ms 点滅出力モード
@@ -58,8 +60,6 @@ typedef struct {
 } espio_gpio_state_t;
 
 // グローバル変数
-static uint8_t gpio_read_pin = 0;
-static uint8_t gpio_read_state = 0;
 static uint16_t conn_handle = 0;
 static espio_gpio_state_t gpio_states[40] = {0};  // 全 GPIO の状態
 static esp_timer_handle_t blink_timer = NULL;
@@ -118,12 +118,6 @@ static esp_err_t gpio_set_mode(uint8_t pin, uint8_t command) {
     espio_gpio_state_t *state = &gpio_states[pin];
 
     switch (command) {
-        case CMD_SET_INPUT:
-            io_conf.mode = GPIO_MODE_INPUT;
-            gpio_config(&io_conf);
-            state->mode = ESPIO_MODE_INPUT;
-            ESP_LOGI(TAG, "Set GPIO%d to INPUT", pin);
-            break;
         case CMD_SET_OUTPUT:
             io_conf.mode = GPIO_MODE_OUTPUT;
             gpio_config(&io_conf);
@@ -137,12 +131,25 @@ static esp_err_t gpio_set_mode(uint8_t pin, uint8_t command) {
                 ESP_LOGI(TAG, "Set GPIO%d to OUTPUT (set to LOW)", pin);
             }
             break;
+        case CMD_SET_INPUT_FLOATING:
+            io_conf.mode = GPIO_MODE_INPUT;
+            gpio_config(&io_conf);
+            state->mode = ESPIO_MODE_INPUT_FLOATING;
+            ESP_LOGI(TAG, "Set GPIO%d to INPUT_FLOATING", pin);
+            break;
         case CMD_SET_INPUT_PULLUP:
             io_conf.mode = GPIO_MODE_INPUT;
             io_conf.pull_up_en = GPIO_PULLUP_ENABLE;
             gpio_config(&io_conf);
             state->mode = ESPIO_MODE_INPUT_PULLUP;
             ESP_LOGI(TAG, "Set GPIO%d to INPUT_PULLUP", pin);
+            break;
+        case CMD_SET_INPUT_PULLDOWN:
+            io_conf.mode = GPIO_MODE_INPUT;
+            io_conf.pull_down_en = GPIO_PULLDOWN_ENABLE;
+            gpio_config(&io_conf);
+            state->mode = ESPIO_MODE_INPUT_PULLDOWN;
+            ESP_LOGI(TAG, "Set GPIO%d to INPUT_PULLDOWN", pin);
             break;
         default:
             ESP_LOGE(TAG, "Invalid mode command: %d", command);
@@ -157,6 +164,14 @@ static esp_err_t gpio_write_level(uint8_t pin, uint8_t command) {
         ESP_LOGE(TAG, "Invalid GPIO pin: %d", pin);
         return ESP_ERR_INVALID_ARG;
     }
+
+    // GPIO を出力モードに設定
+    gpio_config_t io_conf = {};
+    io_conf.pin_bit_mask = (1ULL << pin);
+    io_conf.mode = GPIO_MODE_OUTPUT;
+    io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
+    io_conf.pull_up_en = GPIO_PULLUP_DISABLE;
+    gpio_config(&io_conf);
 
     espio_gpio_state_t *state = &gpio_states[pin];
     uint32_t level;
@@ -219,17 +234,6 @@ static esp_err_t gpio_start_blink(uint8_t pin, uint8_t command) {
     return ESP_OK;
 }
 
-static esp_err_t gpio_read_level(uint8_t pin, uint8_t *state) {
-    if (!is_valid_gpio(pin)) {
-        ESP_LOGE(TAG, "Invalid GPIO pin: %d", pin);
-        return ESP_ERR_INVALID_ARG;
-    }
-
-    *state = gpio_get_level(pin);
-    ESP_LOGI(TAG, "Read GPIO%d: %d", pin, *state);
-    return ESP_OK;
-}
-
 // BLE キャラクタリスティック コールバック
 static int gatt_svr_chr_write_cb(uint16_t conn_handle, uint16_t attr_handle,
                                   struct ble_gatt_access_ctxt *ctxt, void *arg) {
@@ -240,62 +244,95 @@ static int gatt_svr_chr_write_cb(uint16_t conn_handle, uint16_t attr_handle,
     struct os_mbuf *om = ctxt->om;
     uint16_t len = OS_MBUF_PKTLEN(om);
 
-    if (len != 2) {
-        ESP_LOGE(TAG, "Invalid write length: %d (expected 2)", len);
+    // 最小長チェック: 1 (コマンド個数) + 4 (最低1コマンド)
+    if (len < 5) {
+        ESP_LOGE(TAG, "Invalid write length: %d (minimum 5)", len);
         return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
     }
 
-    uint8_t data[2];
-    os_mbuf_copydata(om, 0, 2, data);
+    uint8_t cmd_count;
+    os_mbuf_copydata(om, 0, 1, &cmd_count);
 
-    uint8_t pin = data[0];
-    uint8_t command = data[1];
-
-    ESP_LOGI(TAG, "Write characteristic: pin=%d, command=%d", pin, command);
-
-    esp_err_t ret;
-    if (command <= CMD_SET_INPUT_PULLUP) {
-        ret = gpio_set_mode(pin, command);
-    } else if (command == CMD_WRITE_LOW || command == CMD_WRITE_HIGH) {
-        ret = gpio_write_level(pin, command);
-    } else if (command == CMD_BLINK_500MS || command == CMD_BLINK_250MS) {
-        ret = gpio_start_blink(pin, command);
-    } else {
-        ESP_LOGE(TAG, "Unknown command: %d", command);
+    // パケット長チェック
+    uint16_t expected_len = 1 + (cmd_count * 4);
+    if (len != expected_len) {
+        ESP_LOGE(TAG, "Invalid packet length: %d (expected %d for %d commands)",
+                 len, expected_len, cmd_count);
         return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
     }
 
-    return (ret == ESP_OK) ? 0 : BLE_ATT_ERR_UNLIKELY;
+    ESP_LOGI(TAG, "Received %d commands", cmd_count);
+
+    // 各コマンドを処理
+    for (int i = 0; i < cmd_count; i++) {
+        uint8_t cmd_data[4];
+        os_mbuf_copydata(om, 1 + (i * 4), 4, cmd_data);
+
+        uint8_t pin = cmd_data[0];
+        uint8_t command = cmd_data[1];
+        // cmd_data[2] と cmd_data[3] は将来用のパラメータ (現在未使用)
+
+        ESP_LOGI(TAG, "Command %d: pin=%d, command=%d", i + 1, pin, command);
+
+        esp_err_t ret;
+        if (command <= CMD_SET_INPUT_PULLDOWN) {
+            ret = gpio_set_mode(pin, command);
+        } else if (command == CMD_WRITE_LOW || command == CMD_WRITE_HIGH) {
+            ret = gpio_write_level(pin, command);
+        } else if (command == CMD_BLINK_500MS || command == CMD_BLINK_250MS) {
+            ret = gpio_start_blink(pin, command);
+        } else {
+            ESP_LOGE(TAG, "Unknown command: %d", command);
+            return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+        }
+
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Command %d failed", i + 1);
+            return BLE_ATT_ERR_UNLIKELY;
+        }
+    }
+
+    return 0;
 }
 
 static int gatt_svr_chr_read_cb(uint16_t conn_handle, uint16_t attr_handle,
                                 struct ble_gatt_access_ctxt *ctxt, void *arg) {
-    if (ctxt->op == BLE_GATT_ACCESS_OP_WRITE_CHR) {
-        // WRITE 操作: ピン番号を設定
-        struct os_mbuf *om = ctxt->om;
-        uint16_t len = OS_MBUF_PKTLEN(om);
+    if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) {
+        // READ 操作: すべての入力モード設定済みピンの状態を返す
+        uint8_t buffer[123];  // 最大 1 (カウント) + 61 * 2 (ピン番号と状態) = 123 バイト
+        uint8_t count = 0;
 
-        if (len != 1) {
-            ESP_LOGE(TAG, "Invalid write length: %d (expected 1)", len);
-            return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+        // すべての GPIO をスキャンして、入力モードのピンを収集
+        for (int pin = 0; pin < 40; pin++) {
+            if (!is_valid_gpio(pin)) {
+                continue;
+            }
+
+            espio_gpio_state_t *state = &gpio_states[pin];
+
+            // 入力モードかチェック
+            if (state->mode == ESPIO_MODE_INPUT_FLOATING ||
+                state->mode == ESPIO_MODE_INPUT_PULLUP ||
+                state->mode == ESPIO_MODE_INPUT_PULLDOWN) {
+
+                uint8_t level = gpio_get_level(pin);
+                buffer[1 + count * 2] = pin;
+                buffer[1 + count * 2 + 1] = level;
+                count++;
+
+                ESP_LOGI(TAG, "Input GPIO%d: %s", pin, level ? "HIGH" : "LOW");
+            }
         }
 
-        os_mbuf_copydata(om, 0, 1, &gpio_read_pin);
-        ESP_LOGI(TAG, "Set read target pin: GPIO%d", gpio_read_pin);
-        return 0;
-    } else if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) {
-        // READ 操作: ピン番号と状態を返す
-        // ピンの状態を読み取る
-        if (gpio_read_level(gpio_read_pin, &gpio_read_state) != ESP_OK) {
-            return BLE_ATT_ERR_UNLIKELY;
-        }
-        uint8_t data[2] = {gpio_read_pin, gpio_read_state};
-        ESP_LOGI(TAG, "Sending data: pin=%d, state=%d, size=%d", data[0], data[1], sizeof(data));
-        int rc = os_mbuf_append(ctxt->om, data, sizeof(data));
-        ESP_LOGI(TAG, "os_mbuf_append result: %d", rc);
+        buffer[0] = count;
+        uint16_t data_len = 1 + count * 2;
+
+        ESP_LOGI(TAG, "Sending %d input states (%d bytes)", count, data_len);
+        int rc = os_mbuf_append(ctxt->om, buffer, data_len);
         return (rc == 0) ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
     }
 
+    // WRITE 操作は無効
     return BLE_ATT_ERR_UNLIKELY;
 }
 
@@ -315,7 +352,7 @@ static const struct ble_gatt_svc_def gatt_svr_svcs[] = {
                 // GPIO 読み取りキャラクタリスティック
                 .uuid = &gatt_svr_chr_read_uuid.u,
                 .access_cb = gatt_svr_chr_read_cb,
-                .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_WRITE,
+                .flags = BLE_GATT_CHR_F_READ,
             },
             {
                 0, // 終端
@@ -367,6 +404,8 @@ static void ble_app_advertise(void) {
     memset(&adv_params, 0, sizeof(adv_params));
     adv_params.conn_mode = BLE_GAP_CONN_MODE_UND;
     adv_params.disc_mode = BLE_GAP_DISC_MODE_GEN;
+    adv_params.itvl_min = BLE_GAP_ADV_FAST_INTERVAL1_MIN;  // 30ms
+    adv_params.itvl_max = BLE_GAP_ADV_FAST_INTERVAL1_MAX;  // 60ms
 
     ble_gap_adv_start(BLE_OWN_ADDR_PUBLIC, NULL, BLE_HS_FOREVER,
                       &adv_params, ble_gap_event, NULL);
@@ -410,6 +449,11 @@ void app_main(void) {
 
     // GATT サービス初期化
     ble_hs_cfg.sync_cb = ble_app_on_sync;
+
+    // ATT MTU を 247 バイトに設定 (最大 61 コマンドまで送信可能)
+    ble_att_set_preferred_mtu(247);
+    ESP_LOGI(TAG, "Set preferred MTU to 247 bytes");
+
     ble_svc_gap_init();
     ble_svc_gatt_init();
     ble_gatts_count_cfg(gatt_svr_svcs);
