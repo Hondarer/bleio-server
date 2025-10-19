@@ -6,6 +6,7 @@
 #include "esp_timer.h"
 #include "nvs_flash.h"
 #include "driver/gpio.h"
+#include "driver/ledc.h"
 
 #include "host/ble_hs.h"
 #include "host/ble_uuid.h"
@@ -39,6 +40,7 @@ static const ble_uuid128_t gatt_svr_chr_read_uuid =
 #define CMD_WRITE_HIGH              11
 #define CMD_BLINK_500MS             12
 #define CMD_BLINK_250MS             13
+#define CMD_SET_PWM                 20
 
 // GPIO 最大数
 #define MAX_USABLE_GPIO             24  // 使用可能な GPIO の総数
@@ -62,6 +64,12 @@ static const ble_uuid128_t gatt_svr_chr_read_uuid =
 #define INPUT_POLL_INTERVAL_MS      10  // 入力ポーリング間隔 (ms)
 #define LATCH_STABLE_COUNT          2   // ラッチ判定に必要な連続安定回数
 
+// PWM 設定
+#define LEDC_CHANNEL_MAX            8   // Low Speed モードで使用可能なチャネル数
+#define LEDC_TIMER_RESOLUTION       LEDC_TIMER_8_BIT  // 8 ビット分解能 (0-255)
+#define LEDC_TIMER_NUM              LEDC_TIMER_0      // 使用するタイマー番号
+#define LEDC_SPEED_MODE             LEDC_LOW_SPEED_MODE
+
 // GPIO モード状態の定義
 typedef enum {
     BLEIO_MODE_UNSET = 0,           // モード未設定 (初期状態)
@@ -71,8 +79,22 @@ typedef enum {
     BLEIO_MODE_OUTPUT_LOW,          // LOW (0V) 出力モード
     BLEIO_MODE_OUTPUT_HIGH,         // HIGH (3.3V) 出力モード
     BLEIO_MODE_BLINK_250MS,         // 250ms 点滅出力モード
-    BLEIO_MODE_BLINK_500MS          // 500ms 点滅出力モード
+    BLEIO_MODE_BLINK_500MS,         // 500ms 点滅出力モード
+    BLEIO_MODE_PWM                  // PWM 出力モード
 } bleio_mode_state_t;
+
+// PWM 設定保持用構造体
+typedef struct {
+    uint8_t duty_cycle;            // デューティサイクル (0-255)
+    uint8_t freq_preset;           // 周波数プリセット (0-7)
+    int8_t channel;                // 割り当てられた LEDC チャネル (-1: 未割り当て)
+} pwm_config_t;
+
+// LEDC チャネル管理用構造体
+typedef struct {
+    bool in_use;                   // チャネルが使用中か
+    uint8_t gpio_num;              // このチャネルを使用している GPIO 番号
+} ledc_channel_info_t;
 
 // GPIO ごとの状態管理
 typedef struct {
@@ -85,9 +107,24 @@ typedef struct {
     uint8_t last_level;            // 前回の読み取り値
 } bleio_gpio_state_t;
 
+// 周波数プリセットテーブル (Hz)
+static const uint32_t pwm_freq_table[] = {
+    1000,   // 0: 1 kHz (デフォルト)
+    5000,   // 1: 5 kHz
+    10000,  // 2: 10 kHz
+    25000,  // 3: 25 kHz
+    50,     // 4: 50 Hz (サーボモーター)
+    100,    // 5: 100 Hz
+    500,    // 6: 500 Hz
+    20000   // 7: 20 kHz
+};
+#define PWM_FREQ_TABLE_SIZE (sizeof(pwm_freq_table) / sizeof(pwm_freq_table[0]))
+
 // グローバル変数
 static uint16_t conn_handle = 0;
 static bleio_gpio_state_t gpio_states[40] = {0};  // 全 GPIO の状態
+static pwm_config_t pwm_configs[40] = {0};        // 全 GPIO の PWM 設定
+static ledc_channel_info_t ledc_channels[LEDC_CHANNEL_MAX] = {0};  // LEDC チャネル管理
 static esp_timer_handle_t blink_timer = NULL;
 static esp_timer_handle_t input_poll_timer = NULL;
 static portMUX_TYPE gpio_states_mux = portMUX_INITIALIZER_UNLOCKED;  // gpio_states 保護用スピンロック
@@ -208,11 +245,182 @@ static bool is_valid_gpio(uint8_t pin) {
     return false;
 }
 
+static bool is_valid_output_pin(uint8_t pin) {
+    // 入力専用ピン (GPIO34, 35, 36, 39) を除外
+    if (pin >= 34 && pin <= 39) {
+        return false;
+    }
+    return is_valid_gpio(pin);
+}
+
+// PWM 関連関数
+static void pwm_init(void) {
+    // LEDC タイマー設定
+    ledc_timer_config_t timer_conf = {
+        .speed_mode = LEDC_SPEED_MODE,
+        .duty_resolution = LEDC_TIMER_RESOLUTION,
+        .timer_num = LEDC_TIMER_NUM,
+        .freq_hz = pwm_freq_table[0],  // デフォルト周波数 (1 kHz)
+        .clk_cfg = LEDC_AUTO_CLK
+    };
+    esp_err_t ret = ledc_timer_config(&timer_conf);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "LEDC timer config failed: %s", esp_err_to_name(ret));
+        return;
+    }
+
+    // チャネル管理テーブルの初期化
+    for (int i = 0; i < LEDC_CHANNEL_MAX; i++) {
+        ledc_channels[i].in_use = false;
+        ledc_channels[i].gpio_num = 0;
+    }
+
+    // PWM 設定の初期化
+    for (int i = 0; i < 40; i++) {
+        pwm_configs[i].duty_cycle = 0;
+        pwm_configs[i].freq_preset = 0;
+        pwm_configs[i].channel = -1;
+    }
+
+    ESP_LOGI(TAG, "PWM initialized (timer=%d, resolution=%d bit, default freq=%d Hz)",
+             LEDC_TIMER_NUM, (1 << LEDC_TIMER_RESOLUTION) - 1, pwm_freq_table[0]);
+}
+
+static int8_t allocate_ledc_channel(uint8_t gpio_num) {
+    // 既にこの GPIO に割り当てられているチャネルがあれば再利用
+    for (int i = 0; i < LEDC_CHANNEL_MAX; i++) {
+        if (ledc_channels[i].in_use && ledc_channels[i].gpio_num == gpio_num) {
+            return (int8_t)i;
+        }
+    }
+
+    // 空きチャネルを検索
+    for (int i = 0; i < LEDC_CHANNEL_MAX; i++) {
+        if (!ledc_channels[i].in_use) {
+            ledc_channels[i].in_use = true;
+            ledc_channels[i].gpio_num = gpio_num;
+            return (int8_t)i;
+        }
+    }
+
+    // チャネルが不足
+    return -1;
+}
+
+static void free_ledc_channel(uint8_t gpio_num) {
+    for (int i = 0; i < LEDC_CHANNEL_MAX; i++) {
+        if (ledc_channels[i].in_use && ledc_channels[i].gpio_num == gpio_num) {
+            ledc_stop(LEDC_SPEED_MODE, (ledc_channel_t)i, 0);
+            ledc_channels[i].in_use = false;
+            ledc_channels[i].gpio_num = 0;
+            pwm_configs[gpio_num].channel = -1;
+            ESP_LOGI(TAG, "Freed LEDC channel %d for GPIO%d", i, gpio_num);
+            break;
+        }
+    }
+}
+
+static void stop_pwm_if_active(uint8_t pin) {
+    portENTER_CRITICAL(&gpio_states_mux);
+    bleio_mode_state_t mode = gpio_states[pin].mode;
+    portEXIT_CRITICAL(&gpio_states_mux);
+
+    if (mode == BLEIO_MODE_PWM) {
+        free_ledc_channel(pin);
+        ESP_LOGI(TAG, "Stopped PWM on GPIO%d", pin);
+    }
+}
+
+static esp_err_t gpio_set_pwm(uint8_t pin, uint8_t duty_cycle, uint8_t freq_preset) {
+    // パラメータ検証
+    if (!is_valid_output_pin(pin)) {
+        ESP_LOGE(TAG, "GPIO%d は PWM 出力に対応していません", pin);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (freq_preset >= PWM_FREQ_TABLE_SIZE) {
+        ESP_LOGE(TAG, "無効な周波数プリセット: %d (最大: %d)", freq_preset, PWM_FREQ_TABLE_SIZE - 1);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    // 既存のモードをクリーンアップ
+    portENTER_CRITICAL(&gpio_states_mux);
+    bleio_mode_state_t prev_mode = gpio_states[pin].mode;
+    portEXIT_CRITICAL(&gpio_states_mux);
+
+    if (prev_mode == BLEIO_MODE_BLINK_250MS || prev_mode == BLEIO_MODE_BLINK_500MS) {
+        // 点滅モードは特にクリーンアップ不要 (タイマーコールバックで自動スキップされる)
+    }
+
+    if (prev_mode == BLEIO_MODE_PWM) {
+        free_ledc_channel(pin);
+    }
+
+    // LEDC チャネルを割り当て
+    int8_t channel = allocate_ledc_channel(pin);
+    if (channel < 0) {
+        ESP_LOGE(TAG, "LEDC チャネルが不足しています (最大 %d チャネル)", LEDC_CHANNEL_MAX);
+        return ESP_ERR_NO_MEM;
+    }
+
+    // 周波数を設定 (タイマー 0 を使用)
+    uint32_t freq_hz = pwm_freq_table[freq_preset];
+    ledc_timer_config_t timer_conf = {
+        .speed_mode = LEDC_SPEED_MODE,
+        .duty_resolution = LEDC_TIMER_RESOLUTION,
+        .timer_num = LEDC_TIMER_NUM,
+        .freq_hz = freq_hz,
+        .clk_cfg = LEDC_AUTO_CLK
+    };
+    esp_err_t ret = ledc_timer_config(&timer_conf);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "LEDC timer config failed: %s", esp_err_to_name(ret));
+        ledc_channels[channel].in_use = false;
+        ledc_channels[channel].gpio_num = 0;
+        return ret;
+    }
+
+    // チャネルを設定
+    ledc_channel_config_t channel_conf = {
+        .gpio_num = pin,
+        .speed_mode = LEDC_SPEED_MODE,
+        .channel = (ledc_channel_t)channel,
+        .intr_type = LEDC_INTR_DISABLE,
+        .timer_sel = LEDC_TIMER_NUM,
+        .duty = duty_cycle,  // 8 ビット値 (0-255)
+        .hpoint = 0
+    };
+    ret = ledc_channel_config(&channel_conf);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "LEDC channel config failed: %s", esp_err_to_name(ret));
+        ledc_channels[channel].in_use = false;
+        ledc_channels[channel].gpio_num = 0;
+        return ret;
+    }
+
+    // 設定を保存
+    pwm_configs[pin].duty_cycle = duty_cycle;
+    pwm_configs[pin].freq_preset = freq_preset;
+    pwm_configs[pin].channel = channel;
+
+    portENTER_CRITICAL(&gpio_states_mux);
+    gpio_states[pin].mode = BLEIO_MODE_PWM;
+    portEXIT_CRITICAL(&gpio_states_mux);
+
+    ESP_LOGI(TAG, "GPIO%d を PWM 出力に設定しました (デューティ: %d/255 = %.1f%%, 周波数: %d Hz, チャネル: %d)",
+             pin, duty_cycle, (duty_cycle * 100.0) / 255.0, freq_hz, channel);
+
+    return ESP_OK;
+}
+
 static esp_err_t gpio_set_mode(uint8_t pin, uint8_t command, uint8_t latch_mode) {
     if (!is_valid_gpio(pin)) {
         ESP_LOGE(TAG, "Invalid GPIO pin: %d", pin);
         return ESP_ERR_INVALID_ARG;
     }
+
+    // PWM が有効な場合は停止
+    stop_pwm_if_active(pin);
 
     gpio_config_t io_conf = {};
     io_conf.pin_bit_mask = (1ULL << pin);
@@ -293,6 +501,9 @@ static esp_err_t gpio_write_level(uint8_t pin, uint8_t command) {
         return ESP_ERR_INVALID_ARG;
     }
 
+    // PWM が有効な場合は停止
+    stop_pwm_if_active(pin);
+
     // GPIO を出力モードに設定
     gpio_config_t io_conf = {};
     io_conf.pin_bit_mask = (1ULL << pin);
@@ -333,6 +544,9 @@ static esp_err_t gpio_start_blink(uint8_t pin, uint8_t command) {
         ESP_LOGE(TAG, "Invalid GPIO pin: %d", pin);
         return ESP_ERR_INVALID_ARG;
     }
+
+    // PWM が有効な場合は停止
+    stop_pwm_if_active(pin);
 
     // GPIO を出力モードに設定
     gpio_config_t io_conf = {};
@@ -418,6 +632,8 @@ static int gatt_svr_chr_write_cb(uint16_t conn_handle, uint16_t attr_handle,
             ret = gpio_write_level(pin, command);
         } else if (command == CMD_BLINK_500MS || command == CMD_BLINK_250MS) {
             ret = gpio_start_blink(pin, command);
+        } else if (command == CMD_SET_PWM) {
+            ret = gpio_set_pwm(pin, param1, param2);  // param1 = duty_cycle, param2 = freq_preset
         } else {
             ESP_LOGE(TAG, "Unknown command: %d", command);
             return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
@@ -593,6 +809,9 @@ void app_main(void) {
         ret = nvs_flash_init();
     }
     ESP_ERROR_CHECK(ret);
+
+    // PWM 初期化
+    pwm_init();
 
     // 点滅タイマの初期化 (250ms 周期)
     const esp_timer_create_args_t blink_timer_args = {
