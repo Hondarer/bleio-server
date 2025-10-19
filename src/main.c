@@ -51,13 +51,17 @@ static const ble_uuid128_t gatt_svr_chr_adc_read_uuid =
 #define CMD_SET_ADC_ENABLE 21
 #define CMD_SET_ADC_DISABLE 22
 
+// 内部用途予約 GPIO
+#define GPIO_AUTH_ENABLE 5  // 認証機能有効/無効 (LOW: 有効, HIGH: 無効)
+#define GPIO_PAIRING_MODE 4 // ペアリングモード (LOW: ペアリングモード, HIGH: 通常モード)
+
 // GPIO 最大数
-#define MAX_USABLE_GPIO 24 // 使用可能な GPIO の総数
+#define MAX_USABLE_GPIO 22 // 使用可能な GPIO の総数 (GPIO4, GPIO5 を除く)
 
 // BLE ATT MTU 計算
 // WRITE データ構造: 1 (コマンド個数) + MAX_USABLE_GPIO * 4 (各コマンド 4 バイト)
 // ATT ヘッダ: 3 バイト (Opcode 1 + Attribute Handle 2)
-// 必要な MTU = ATT ヘッダ (3) + ペイロード (1 + 24 * 4) = 3 + 97 = 100 バイト
+// 必要な MTU = ATT ヘッダ (3) + ペイロード (1 + 22 * 4) = 3 + 89 = 92 バイト
 #define ATT_HEADER_SIZE 3
 #define COMMAND_HEADER_SIZE 1 // コマンド個数フィールド
 #define COMMAND_SIZE 4        // 各コマンドのサイズ (Pin + Command + Param1 + Param2)
@@ -177,6 +181,7 @@ static uint8_t global_blink_counter = 0;                          // 全 GPIO �
 static esp_timer_handle_t blink_timer = NULL;
 static esp_timer_handle_t input_poll_timer = NULL;
 static portMUX_TYPE gpio_states_mux = portMUX_INITIALIZER_UNLOCKED; // gpio_states 保護用スピンロック
+static bool auth_mode_enabled = false;                            // 認証モードフラグ
 
 // 関数の前方宣言
 static void ble_app_advertise(void);
@@ -305,11 +310,64 @@ static void input_poll_timer_callback(void *arg)
     }
 }
 
+// 認証機能とペアリングモードの判定
+static bool is_auth_enabled(void)
+{
+    // GPIO5 をプルアップ付き入力として設定
+    gpio_config_t io_conf = {
+        .pin_bit_mask = (1ULL << GPIO_AUTH_ENABLE),
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE
+    };
+    gpio_config(&io_conf);
+
+    vTaskDelay(pdMS_TO_TICKS(10)); // 安定待ち
+
+    int level = gpio_get_level(GPIO_AUTH_ENABLE);
+    return (level == 0); // LOW の場合 true (認証有効)
+}
+
+static bool is_pairing_mode_requested(void)
+{
+    // GPIO4 をプルアップ付き入力として設定
+    gpio_config_t io_conf = {
+        .pin_bit_mask = (1ULL << GPIO_PAIRING_MODE),
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE
+    };
+    gpio_config(&io_conf);
+
+    vTaskDelay(pdMS_TO_TICKS(10)); // 安定待ち
+
+    int level = gpio_get_level(GPIO_PAIRING_MODE);
+    return (level == 0); // LOW の場合 true (ペアリングモード)
+}
+
+static void clear_bonding_info(void)
+{
+    ESP_LOGI(TAG, "ボンディング情報をクリアしています...");
+
+    // NimBLE のボンディング情報をクリア
+    ble_store_clear();
+
+    ESP_LOGI(TAG, "ボンディング情報をクリアしました");
+}
+
 // GPIO 制御関数
 static bool is_valid_gpio(uint8_t pin)
 {
+    // GPIO4, GPIO5 は内部用途に予約されているため除外
+    if (pin == GPIO_AUTH_ENABLE || pin == GPIO_PAIRING_MODE)
+    {
+        return false;
+    }
+
     // 使用可能な GPIO ピン
-    if (pin == 2 || (pin >= 4 && pin <= 5) || (pin >= 12 && pin <= 19) ||
+    if (pin == 2 || (pin >= 12 && pin <= 19) ||
         (pin >= 21 && pin <= 27) || (pin >= 32 && pin <= 36) || pin == 39)
     {
         return true;
@@ -1222,6 +1280,17 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
     return 0;
 }
 
+// BLE セキュリティ設定
+static void ble_app_set_security(void)
+{
+    ble_hs_cfg.sm_io_cap = BLE_SM_IO_CAP_NO_IO;
+    ble_hs_cfg.sm_bonding = 1;  // ボンディング有効
+    ble_hs_cfg.sm_mitm = 0;     // MITM 保護なし (NoInputNoOutput のため)
+    ble_hs_cfg.sm_sc = 1;       // Secure Connections 有効
+    ble_hs_cfg.sm_our_key_dist = BLE_SM_PAIR_KEY_DIST_ENC;
+    ble_hs_cfg.sm_their_key_dist = BLE_SM_PAIR_KEY_DIST_ENC;
+}
+
 // BLE アドバタイズ開始
 static void ble_app_advertise(void)
 {
@@ -1282,6 +1351,43 @@ static void ble_app_advertise(void)
 static void ble_app_on_sync(void)
 {
     ESP_LOGI(TAG, "BLE host synchronized");
+
+    // MAC アドレスを取得
+    uint8_t own_addr_type;
+    uint8_t addr[6];
+    int rc = ble_hs_id_infer_auto(0, &own_addr_type);
+    if (rc != 0)
+    {
+        ESP_LOGE(TAG, "Failed to infer address type: rc=%d", rc);
+        return;
+    }
+
+    rc = ble_hs_id_copy_addr(own_addr_type, addr, NULL);
+    if (rc != 0)
+    {
+        ESP_LOGE(TAG, "Failed to copy address: rc=%d", rc);
+        return;
+    }
+
+    // MAC アドレスの下位3バイトを使用してデバイス名を生成
+    // addr[0] が最下位バイト、addr[5] が最上位バイト
+    // 下位3バイトを表示するには addr[2], addr[1], addr[0] の順
+    char device_name[32];
+    if (auth_mode_enabled)
+    {
+        snprintf(device_name, sizeof(device_name), "BLEIO %02x%02x%02x [SEC]",
+                 addr[2], addr[1], addr[0]);
+    }
+    else
+    {
+        snprintf(device_name, sizeof(device_name), "BLEIO %02x%02x%02x",
+                 addr[2], addr[1], addr[0]);
+    }
+
+    // デバイス名を設定
+    ble_svc_gap_device_name_set(device_name);
+    ESP_LOGI(TAG, "Device name set to: %s", device_name);
+
     ble_hs_util_ensure_addr(0);
     ble_app_advertise();
 }
@@ -1328,14 +1434,50 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_timer_start_periodic(input_poll_timer, INPUT_POLL_INTERVAL_MS * 1000)); // 10ms = 10000us
     ESP_LOGI(TAG, "Input poll timer started (%dms interval)", INPUT_POLL_INTERVAL_MS);
 
+    // 認証機能の有効/無効をチェック
+    auth_mode_enabled = is_auth_enabled();
+
+    if (auth_mode_enabled)
+    {
+        ESP_LOGI(TAG, "認証機能が有効です (GPIO%d = LOW)", GPIO_AUTH_ENABLE);
+
+        // ペアリングモードのチェック (認証有効時のみ)
+        bool pairing_mode = is_pairing_mode_requested();
+
+        if (pairing_mode)
+        {
+            ESP_LOGI(TAG, "ペアリングモードで起動します (GPIO%d = LOW) - ボンディング情報をクリアします", GPIO_PAIRING_MODE);
+        }
+        else
+        {
+            ESP_LOGI(TAG, "認証有効モードで起動します (GPIO%d = HIGH)", GPIO_PAIRING_MODE);
+        }
+    }
+    else
+    {
+        ESP_LOGI(TAG, "認証機能が無効です (GPIO%d = HIGH)", GPIO_AUTH_ENABLE);
+    }
+
     // NimBLE 初期化
     ESP_ERROR_CHECK(nimble_port_init());
 
     // GATT サービス初期化
     ble_hs_cfg.sync_cb = ble_app_on_sync;
 
-    // ATT MTU を設定 (最大 24 コマンドまで送信可能)
-    // 必要 MTU = ATT ヘッダ (3) + コマンド個数 (1) + コマンド (24 * 4) = 100 バイト
+    // 認証有効時のみセキュリティ設定とボンディング情報のクリア
+    if (auth_mode_enabled)
+    {
+        ble_app_set_security();
+
+        // ペアリングモードの場合、ボンディング情報をクリア
+        if (is_pairing_mode_requested())
+        {
+            clear_bonding_info();
+        }
+    }
+
+    // ATT MTU を設定 (最大 22 コマンドまで送信可能)
+    // 必要 MTU = ATT ヘッダ (3) + コマンド個数 (1) + コマンド (22 * 4) = 92 バイト
     ble_att_set_preferred_mtu(REQUIRED_MTU);
     ESP_LOGI(TAG, "Set preferred MTU to %d bytes (max %d commands, payload %d bytes)",
              REQUIRED_MTU, MAX_USABLE_GPIO, PAYLOAD_SIZE);
@@ -1345,11 +1487,8 @@ void app_main(void)
     ble_gatts_count_cfg(gatt_svr_svcs);
     ble_gatts_add_svcs(gatt_svr_svcs);
 
-    // デバイス名設定
-    ble_svc_gap_device_name_set("BLEIO");
-
     // BLE ホストタスク起動
     nimble_port_freertos_init(ble_host_task);
 
-    ESP_LOGI(TAG, "BLE initialization complete. Device name: BLEIO");
+    ESP_LOGI(TAG, "BLE initialization complete");
 }
