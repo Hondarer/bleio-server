@@ -39,75 +39,79 @@ static const ble_uuid128_t gatt_svr_chr_adc_read_uuid =
                      0x1b, 0x4a, 0x9f, 0x4e, 0x3c, 0x7b, 0x8a, 0x2d);
 
 // GPIO コマンド定義
-#define CMD_SET_OUTPUT              0
-#define CMD_SET_INPUT_FLOATING      1
-#define CMD_SET_INPUT_PULLUP        2
-#define CMD_SET_INPUT_PULLDOWN      3
-#define CMD_WRITE_LOW               10
-#define CMD_WRITE_HIGH              11
-#define CMD_BLINK_500MS             12
-#define CMD_BLINK_250MS             13
-#define CMD_SET_PWM                 20
-#define CMD_SET_ADC_ENABLE          30
-#define CMD_SET_ADC_DISABLE         31
+#define CMD_SET_OUTPUT 0
+#define CMD_SET_INPUT_FLOATING 1
+#define CMD_SET_INPUT_PULLUP 2
+#define CMD_SET_INPUT_PULLDOWN 3
+#define CMD_WRITE_LOW 10
+#define CMD_WRITE_HIGH 11
+#define CMD_BLINK_500MS 12
+#define CMD_BLINK_250MS 13
+#define CMD_SET_PWM 20
+#define CMD_SET_ADC_ENABLE 30
+#define CMD_SET_ADC_DISABLE 31
 
 // GPIO 最大数
-#define MAX_USABLE_GPIO             24  // 使用可能な GPIO の総数
+#define MAX_USABLE_GPIO 24 // 使用可能な GPIO の総数
 
 // BLE ATT MTU 計算
 // WRITE データ構造: 1 (コマンド個数) + MAX_USABLE_GPIO * 4 (各コマンド 4 バイト)
 // ATT ヘッダ: 3 バイト (Opcode 1 + Attribute Handle 2)
 // 必要な MTU = ATT ヘッダ (3) + ペイロード (1 + 24 * 4) = 3 + 97 = 100 バイト
-#define ATT_HEADER_SIZE             3
-#define COMMAND_HEADER_SIZE         1   // コマンド個数フィールド
-#define COMMAND_SIZE                4   // 各コマンドのサイズ (Pin + Command + Param1 + Param2)
-#define PAYLOAD_SIZE                (COMMAND_HEADER_SIZE + (MAX_USABLE_GPIO * COMMAND_SIZE))
-#define REQUIRED_MTU                (ATT_HEADER_SIZE + PAYLOAD_SIZE)
+#define ATT_HEADER_SIZE 3
+#define COMMAND_HEADER_SIZE 1 // コマンド個数フィールド
+#define COMMAND_SIZE 4        // 各コマンドのサイズ (Pin + Command + Param1 + Param2)
+#define PAYLOAD_SIZE (COMMAND_HEADER_SIZE + (MAX_USABLE_GPIO * COMMAND_SIZE))
+#define REQUIRED_MTU (ATT_HEADER_SIZE + PAYLOAD_SIZE)
 
 // 入力ラッチモード定義
-#define LATCH_MODE_NONE             0   // ラッチなし
-#define LATCH_MODE_LOW              1   // LOWラッチ
-#define LATCH_MODE_HIGH             2   // HIGHラッチ
+#define LATCH_MODE_NONE 0 // ラッチなし
+#define LATCH_MODE_LOW 1  // LOWラッチ
+#define LATCH_MODE_HIGH 2 // HIGHラッチ
 
 // ポーリング設定
-#define INPUT_POLL_INTERVAL_MS      10  // 入力ポーリング間隔 (ms)
-#define LATCH_STABLE_COUNT          2   // ラッチ判定に必要な連続安定回数
+#define INPUT_POLL_INTERVAL_MS 10 // 入力ポーリング間隔 (ms)
+#define LATCH_STABLE_COUNT 2      // ラッチ判定に必要な連続安定回数
 
 // PWM 設定
-#define LEDC_CHANNEL_MAX            8   // Low Speed モードで使用可能なチャネル数
-#define LEDC_TIMER_RESOLUTION       LEDC_TIMER_8_BIT  // 8 ビット分解能 (0-255)
-#define LEDC_TIMER_NUM              LEDC_TIMER_0      // 使用するタイマー番号
-#define LEDC_SPEED_MODE             LEDC_LOW_SPEED_MODE
+#define LEDC_CHANNEL_MAX 8                     // Low Speed モードで使用可能なチャネル数
+#define LEDC_TIMER_RESOLUTION LEDC_TIMER_8_BIT // 8 ビット分解能 (0-255)
+#define LEDC_TIMER_NUM LEDC_TIMER_0            // 使用するタイマー番号
+#define LEDC_SPEED_MODE LEDC_LOW_SPEED_MODE
 
 // GPIO モード状態の定義
-typedef enum {
-    BLEIO_MODE_UNSET = 0,           // モード未設定 (初期状態)
-    BLEIO_MODE_INPUT_FLOATING,      // ハイインピーダンス入力モード
-    BLEIO_MODE_INPUT_PULLUP,        // 内部プルアップ付き入力モード
-    BLEIO_MODE_INPUT_PULLDOWN,      // 内部プルダウン付き入力モード
-    BLEIO_MODE_OUTPUT_LOW,          // LOW (0V) 出力モード
-    BLEIO_MODE_OUTPUT_HIGH,         // HIGH (3.3V) 出力モード
-    BLEIO_MODE_BLINK_250MS,         // 250ms 点滅出力モード
-    BLEIO_MODE_BLINK_500MS,         // 500ms 点滅出力モード
-    BLEIO_MODE_PWM,                 // PWM 出力モード
-    BLEIO_MODE_ADC                  // ADC 入力モード
+typedef enum
+{
+    BLEIO_MODE_UNSET = 0,      // モード未設定 (初期状態)
+    BLEIO_MODE_INPUT_FLOATING, // ハイインピーダンス入力モード
+    BLEIO_MODE_INPUT_PULLUP,   // 内部プルアップ付き入力モード
+    BLEIO_MODE_INPUT_PULLDOWN, // 内部プルダウン付き入力モード
+    BLEIO_MODE_OUTPUT_LOW,     // LOW (0V) 出力モード
+    BLEIO_MODE_OUTPUT_HIGH,    // HIGH (3.3V) 出力モード
+    BLEIO_MODE_BLINK_250MS,    // 250ms 点滅出力モード
+    BLEIO_MODE_BLINK_500MS,    // 500ms 点滅出力モード
+    BLEIO_MODE_PWM,            // PWM 出力モード
+    BLEIO_MODE_ADC             // ADC 入力モード
 } bleio_mode_state_t;
 
 // PWM 設定保持用構造体
-typedef struct {
-    uint8_t duty_cycle;            // デューティサイクル (0-255)
-    uint8_t freq_preset;           // 周波数プリセット (0-7)
-    int8_t channel;                // 割り当てられた LEDC チャネル (-1: 未割り当て)
+typedef struct
+{
+    uint8_t duty_cycle;  // デューティサイクル (0-255)
+    uint8_t freq_preset; // 周波数プリセット (0-7)
+    int8_t channel;      // 割り当てられた LEDC チャネル (-1: 未割り当て)
 } pwm_config_t;
 
 // LEDC チャネル管理用構造体
-typedef struct {
-    bool in_use;                   // チャネルが使用中か
-    uint8_t gpio_num;              // このチャネルを使用している GPIO 番号
+typedef struct
+{
+    bool in_use;      // チャネルが使用中か
+    uint8_t gpio_num; // このチャネルを使用している GPIO 番号
 } ledc_channel_info_t;
 
 // ADC 設定保持用構造体
-typedef struct {
+typedef struct
+{
     int8_t channel;                // ADC1 チャネル (-1: 未設定)
     adc_atten_t attenuation;       // 減衰率
     bool calibrated;               // キャリブレーション済みか
@@ -115,31 +119,32 @@ typedef struct {
 } adc_config_t;
 
 // GPIO ごとの状態管理
-typedef struct {
-    bleio_mode_state_t mode;       // 現在のモード
-    uint8_t current_level;         // 現在の出力レベル (点滅時に使用)
-    uint8_t blink_counter;         // 点滅用カウンタ (500ms 用)
-    uint8_t latch_mode;            // 入力ラッチモード (0-2)
-    bool is_latched;               // ラッチ済みフラグ
-    uint8_t stable_counter;        // 安定カウンタ
-    uint8_t last_level;            // 前回の読み取り値
+typedef struct
+{
+    bleio_mode_state_t mode; // 現在のモード
+    uint8_t current_level;   // 現在の出力レベル (点滅時に使用)
+    uint8_t latch_mode;      // 入力ラッチモード (0-2)
+    bool is_latched;         // ラッチ済みフラグ
+    uint8_t stable_counter;  // 安定カウンタ
+    uint8_t last_level;      // 前回の読み取り値
 } bleio_gpio_state_t;
 
 // 周波数プリセットテーブル (Hz)
 static const uint32_t pwm_freq_table[] = {
-    1000,   // 0: 1 kHz (デフォルト)
-    5000,   // 1: 5 kHz
-    10000,  // 2: 10 kHz
-    25000,  // 3: 25 kHz
-    50,     // 4: 50 Hz (サーボモーター)
-    100,    // 5: 100 Hz
-    500,    // 6: 500 Hz
-    20000   // 7: 20 kHz
+    1000,  // 0: 1 kHz (デフォルト)
+    5000,  // 1: 5 kHz
+    10000, // 2: 10 kHz
+    25000, // 3: 25 kHz
+    50,    // 4: 50 Hz (サーボモーター)
+    100,   // 5: 100 Hz
+    500,   // 6: 500 Hz
+    20000  // 7: 20 kHz
 };
 #define PWM_FREQ_TABLE_SIZE (sizeof(pwm_freq_table) / sizeof(pwm_freq_table[0]))
 
 // GPIO から ADC1 チャネルへのマッピングテーブル
-static const struct {
+static const struct
+{
     uint8_t gpio_num;
     adc_channel_t channel;
 } adc1_gpio_map[] = {
@@ -148,84 +153,96 @@ static const struct {
     {34, ADC_CHANNEL_6},
     {35, ADC_CHANNEL_7},
     {36, ADC_CHANNEL_0},
-    {39, ADC_CHANNEL_3}
-};
+    {39, ADC_CHANNEL_3}};
 #define ADC1_GPIO_MAP_SIZE (sizeof(adc1_gpio_map) / sizeof(adc1_gpio_map[0]))
 
 // 減衰率マッピングテーブル
 static const adc_atten_t adc_atten_map[] = {
-    ADC_ATTEN_DB_0,    // 0: 0 dB (0-1.1V)
-    ADC_ATTEN_DB_2_5,  // 1: 2.5 dB (0-1.5V)
-    ADC_ATTEN_DB_6,    // 2: 6 dB (0-2.2V)
-    ADC_ATTEN_DB_12    // 3: 12 dB (0-3.3V、旧 11dB)
+    ADC_ATTEN_DB_0,   // 0: 0 dB (0-1.1V)
+    ADC_ATTEN_DB_2_5, // 1: 2.5 dB (0-1.5V)
+    ADC_ATTEN_DB_6,   // 2: 6 dB (0-2.2V)
+    ADC_ATTEN_DB_12   // 3: 12 dB (0-3.3V、旧 11dB)
 };
 #define ADC_ATTEN_MAP_SIZE (sizeof(adc_atten_map) / sizeof(adc_atten_map[0]))
 
 // グローバル変数
 static uint16_t conn_handle = 0;
-static bleio_gpio_state_t gpio_states[40] = {0};  // 全 GPIO の状態
-static pwm_config_t pwm_configs[40] = {0};        // 全 GPIO の PWM 設定
-static ledc_channel_info_t ledc_channels[LEDC_CHANNEL_MAX] = {0};  // LEDC チャネル管理
-static adc_config_t adc_configs[40] = {0};        // 全 GPIO の ADC 設定
-static adc_oneshot_unit_handle_t adc1_handle = NULL;  // ADC1 ユニットハンドル
+static bleio_gpio_state_t gpio_states[40] = {0};                  // 全 GPIO の状態
+static pwm_config_t pwm_configs[40] = {0};                        // 全 GPIO の PWM 設定
+static ledc_channel_info_t ledc_channels[LEDC_CHANNEL_MAX] = {0}; // LEDC チャネル管理
+static adc_config_t adc_configs[40] = {0};                        // 全 GPIO の ADC 設定
+static adc_oneshot_unit_handle_t adc1_handle = NULL;              // ADC1 ユニットハンドル
+static uint8_t global_blink_counter = 0;                          // 全 GPIO 共通の点滅カウンタ
 static esp_timer_handle_t blink_timer = NULL;
 static esp_timer_handle_t input_poll_timer = NULL;
-static portMUX_TYPE gpio_states_mux = portMUX_INITIALIZER_UNLOCKED;  // gpio_states 保護用スピンロック
+static portMUX_TYPE gpio_states_mux = portMUX_INITIALIZER_UNLOCKED; // gpio_states 保護用スピンロック
 
 // 関数の前方宣言
 static void ble_app_advertise(void);
 static bool is_valid_gpio(uint8_t pin);
 
 // 点滅タイマコールバック (250ms 周期)
-static void blink_timer_callback(void* arg) {
-    for (int pin = 0; pin < 40; pin++) {
-        if (!is_valid_gpio(pin)) {
+static void blink_timer_callback(void *arg)
+{
+    // グローバルカウンタを更新 (0-3 の範囲)
+    global_blink_counter++;
+    if (global_blink_counter >= 4)
+    {
+        global_blink_counter = 0;
+    }
+
+    // 250ms 点滅: カウンタが偶数 (0, 2) で点灯、奇数 (1, 3) で消灯
+    bool blink_250ms_level = (global_blink_counter % 2 == 0);
+
+    // 500ms 点滅: カウンタが 0-1 で点灯、2-3 で消灯
+    bool blink_500ms_level = (global_blink_counter < 2);
+
+    for (int pin = 0; pin < 40; pin++)
+    {
+        if (!is_valid_gpio(pin))
+        {
             continue;
         }
 
         portENTER_CRITICAL(&gpio_states_mux);
         bleio_gpio_state_t *state = &gpio_states[pin];
         bleio_mode_state_t mode = state->mode;
-        uint8_t current_level = state->current_level;
-        uint8_t blink_counter = state->blink_counter;
         portEXIT_CRITICAL(&gpio_states_mux);
 
-        bool should_toggle = false;
-        uint8_t new_level = current_level;
-        uint8_t new_counter = blink_counter;
+        uint8_t new_level = 0;
+        bool should_update = false;
 
-        if (mode == BLEIO_MODE_BLINK_250MS) {
-            // 250ms ごとにトグル
-            should_toggle = true;
-            new_level = !current_level;
+        if (mode == BLEIO_MODE_BLINK_250MS)
+        {
+            // 250ms 周期: グローバルカウンタが偶数で点灯
+            new_level = blink_250ms_level ? 1 : 0;
+            should_update = true;
         }
-        else if (mode == BLEIO_MODE_BLINK_500MS) {
-            // カウンタで 2 回に 1 回トグル
-            new_counter++;
-            if (new_counter >= 2) {
-                new_counter = 0;
-                should_toggle = true;
-                new_level = !current_level;
-            }
+        else if (mode == BLEIO_MODE_BLINK_500MS)
+        {
+            // 500ms 周期: グローバルカウンタが 0-1 で点灯
+            new_level = blink_500ms_level ? 1 : 0;
+            should_update = true;
         }
 
-        if (should_toggle || mode == BLEIO_MODE_BLINK_500MS) {
+        if (should_update)
+        {
             portENTER_CRITICAL(&gpio_states_mux);
             state->current_level = new_level;
-            state->blink_counter = new_counter;
             portEXIT_CRITICAL(&gpio_states_mux);
 
-            if (should_toggle) {
-                gpio_set_level(pin, new_level);
-            }
+            gpio_set_level(pin, new_level);
         }
     }
 }
 
 // 入力ポーリングタイマコールバック (10ms 周期)
-static void input_poll_timer_callback(void* arg) {
-    for (int pin = 0; pin < 40; pin++) {
-        if (!is_valid_gpio(pin)) {
+static void input_poll_timer_callback(void *arg)
+{
+    for (int pin = 0; pin < 40; pin++)
+    {
+        if (!is_valid_gpio(pin))
+        {
             continue;
         }
 
@@ -239,14 +256,16 @@ static void input_poll_timer_callback(void* arg) {
         portEXIT_CRITICAL(&gpio_states_mux);
 
         // ラッチモードが設定されていない、または既にラッチ済みの場合はスキップ
-        if (latch_mode == LATCH_MODE_NONE || is_latched) {
+        if (latch_mode == LATCH_MODE_NONE || is_latched)
+        {
             continue;
         }
 
         // 入力モードかチェック
         if (mode != BLEIO_MODE_INPUT_FLOATING &&
             mode != BLEIO_MODE_INPUT_PULLUP &&
-            mode != BLEIO_MODE_INPUT_PULLDOWN) {
+            mode != BLEIO_MODE_INPUT_PULLDOWN)
+        {
             continue;
         }
 
@@ -256,17 +275,24 @@ static void input_poll_timer_callback(void* arg) {
         bool new_is_latched = is_latched;
         uint8_t new_stable_counter = stable_counter;
 
-        if (level == target) {
-            if (last_level == target) {
+        if (level == target)
+        {
+            if (last_level == target)
+            {
                 new_stable_counter++;
-                if (new_stable_counter >= LATCH_STABLE_COUNT) {
+                if (new_stable_counter >= LATCH_STABLE_COUNT)
+                {
                     new_is_latched = true;
                     ESP_LOGI(TAG, "GPIO%d latched to %s", pin, target ? "HIGH" : "LOW");
                 }
-            } else {
+            }
+            else
+            {
                 new_stable_counter = 1;
             }
-        } else {
+        }
+        else
+        {
             new_stable_counter = 0;
         }
 
@@ -279,47 +305,54 @@ static void input_poll_timer_callback(void* arg) {
 }
 
 // GPIO 制御関数
-static bool is_valid_gpio(uint8_t pin) {
+static bool is_valid_gpio(uint8_t pin)
+{
     // 使用可能な GPIO ピン
     if (pin == 2 || (pin >= 4 && pin <= 5) || (pin >= 12 && pin <= 19) ||
-        (pin >= 21 && pin <= 27) || (pin >= 32 && pin <= 36) || pin == 39) {
+        (pin >= 21 && pin <= 27) || (pin >= 32 && pin <= 36) || pin == 39)
+    {
         return true;
     }
     return false;
 }
 
-static bool is_valid_output_pin(uint8_t pin) {
+static bool is_valid_output_pin(uint8_t pin)
+{
     // 入力専用ピン (GPIO34, 35, 36, 39) を除外
-    if (pin >= 34 && pin <= 39) {
+    if (pin >= 34 && pin <= 39)
+    {
         return false;
     }
     return is_valid_gpio(pin);
 }
 
 // PWM 関連関数
-static void pwm_init(void) {
+static void pwm_init(void)
+{
     // LEDC タイマー設定
     ledc_timer_config_t timer_conf = {
         .speed_mode = LEDC_SPEED_MODE,
         .duty_resolution = LEDC_TIMER_RESOLUTION,
         .timer_num = LEDC_TIMER_NUM,
-        .freq_hz = pwm_freq_table[0],  // デフォルト周波数 (1 kHz)
-        .clk_cfg = LEDC_AUTO_CLK
-    };
+        .freq_hz = pwm_freq_table[0], // デフォルト周波数 (1 kHz)
+        .clk_cfg = LEDC_AUTO_CLK};
     esp_err_t ret = ledc_timer_config(&timer_conf);
-    if (ret != ESP_OK) {
+    if (ret != ESP_OK)
+    {
         ESP_LOGE(TAG, "LEDC timer config failed: %s", esp_err_to_name(ret));
         return;
     }
 
     // チャネル管理テーブルの初期化
-    for (int i = 0; i < LEDC_CHANNEL_MAX; i++) {
+    for (int i = 0; i < LEDC_CHANNEL_MAX; i++)
+    {
         ledc_channels[i].in_use = false;
         ledc_channels[i].gpio_num = 0;
     }
 
     // PWM 設定の初期化
-    for (int i = 0; i < 40; i++) {
+    for (int i = 0; i < 40; i++)
+    {
         pwm_configs[i].duty_cycle = 0;
         pwm_configs[i].freq_preset = 0;
         pwm_configs[i].channel = -1;
@@ -329,17 +362,22 @@ static void pwm_init(void) {
              LEDC_TIMER_NUM, (1 << LEDC_TIMER_RESOLUTION) - 1, pwm_freq_table[0]);
 }
 
-static int8_t allocate_ledc_channel(uint8_t gpio_num) {
+static int8_t allocate_ledc_channel(uint8_t gpio_num)
+{
     // 既にこの GPIO に割り当てられているチャネルがあれば再利用
-    for (int i = 0; i < LEDC_CHANNEL_MAX; i++) {
-        if (ledc_channels[i].in_use && ledc_channels[i].gpio_num == gpio_num) {
+    for (int i = 0; i < LEDC_CHANNEL_MAX; i++)
+    {
+        if (ledc_channels[i].in_use && ledc_channels[i].gpio_num == gpio_num)
+        {
             return (int8_t)i;
         }
     }
 
     // 空きチャネルを検索
-    for (int i = 0; i < LEDC_CHANNEL_MAX; i++) {
-        if (!ledc_channels[i].in_use) {
+    for (int i = 0; i < LEDC_CHANNEL_MAX; i++)
+    {
+        if (!ledc_channels[i].in_use)
+        {
             ledc_channels[i].in_use = true;
             ledc_channels[i].gpio_num = gpio_num;
             return (int8_t)i;
@@ -350,9 +388,12 @@ static int8_t allocate_ledc_channel(uint8_t gpio_num) {
     return -1;
 }
 
-static void free_ledc_channel(uint8_t gpio_num) {
-    for (int i = 0; i < LEDC_CHANNEL_MAX; i++) {
-        if (ledc_channels[i].in_use && ledc_channels[i].gpio_num == gpio_num) {
+static void free_ledc_channel(uint8_t gpio_num)
+{
+    for (int i = 0; i < LEDC_CHANNEL_MAX; i++)
+    {
+        if (ledc_channels[i].in_use && ledc_channels[i].gpio_num == gpio_num)
+        {
             ledc_stop(LEDC_SPEED_MODE, (ledc_channel_t)i, 0);
             ledc_channels[i].in_use = false;
             ledc_channels[i].gpio_num = 0;
@@ -363,25 +404,30 @@ static void free_ledc_channel(uint8_t gpio_num) {
     }
 }
 
-static void stop_pwm_if_active(uint8_t pin) {
+static void stop_pwm_if_active(uint8_t pin)
+{
     portENTER_CRITICAL(&gpio_states_mux);
     bleio_mode_state_t mode = gpio_states[pin].mode;
     portEXIT_CRITICAL(&gpio_states_mux);
 
-    if (mode == BLEIO_MODE_PWM) {
+    if (mode == BLEIO_MODE_PWM)
+    {
         free_ledc_channel(pin);
         ESP_LOGI(TAG, "Stopped PWM on GPIO%d", pin);
     }
 }
 
-static esp_err_t gpio_set_pwm(uint8_t pin, uint8_t duty_cycle, uint8_t freq_preset) {
+static esp_err_t gpio_set_pwm(uint8_t pin, uint8_t duty_cycle, uint8_t freq_preset)
+{
     // パラメータ検証
-    if (!is_valid_output_pin(pin)) {
+    if (!is_valid_output_pin(pin))
+    {
         ESP_LOGE(TAG, "GPIO%d は PWM 出力に対応していません", pin);
         return ESP_ERR_INVALID_ARG;
     }
 
-    if (freq_preset >= PWM_FREQ_TABLE_SIZE) {
+    if (freq_preset >= PWM_FREQ_TABLE_SIZE)
+    {
         ESP_LOGE(TAG, "無効な周波数プリセット: %d (最大: %d)", freq_preset, PWM_FREQ_TABLE_SIZE - 1);
         return ESP_ERR_INVALID_ARG;
     }
@@ -391,17 +437,20 @@ static esp_err_t gpio_set_pwm(uint8_t pin, uint8_t duty_cycle, uint8_t freq_pres
     bleio_mode_state_t prev_mode = gpio_states[pin].mode;
     portEXIT_CRITICAL(&gpio_states_mux);
 
-    if (prev_mode == BLEIO_MODE_BLINK_250MS || prev_mode == BLEIO_MODE_BLINK_500MS) {
+    if (prev_mode == BLEIO_MODE_BLINK_250MS || prev_mode == BLEIO_MODE_BLINK_500MS)
+    {
         // 点滅モードは特にクリーンアップ不要 (タイマーコールバックで自動スキップされる)
     }
 
-    if (prev_mode == BLEIO_MODE_PWM) {
+    if (prev_mode == BLEIO_MODE_PWM)
+    {
         free_ledc_channel(pin);
     }
 
     // LEDC チャネルを割り当て
     int8_t channel = allocate_ledc_channel(pin);
-    if (channel < 0) {
+    if (channel < 0)
+    {
         ESP_LOGE(TAG, "LEDC チャネルが不足しています (最大 %d チャネル)", LEDC_CHANNEL_MAX);
         return ESP_ERR_NO_MEM;
     }
@@ -413,10 +462,10 @@ static esp_err_t gpio_set_pwm(uint8_t pin, uint8_t duty_cycle, uint8_t freq_pres
         .duty_resolution = LEDC_TIMER_RESOLUTION,
         .timer_num = LEDC_TIMER_NUM,
         .freq_hz = freq_hz,
-        .clk_cfg = LEDC_AUTO_CLK
-    };
+        .clk_cfg = LEDC_AUTO_CLK};
     esp_err_t ret = ledc_timer_config(&timer_conf);
-    if (ret != ESP_OK) {
+    if (ret != ESP_OK)
+    {
         ESP_LOGE(TAG, "LEDC timer config failed: %s", esp_err_to_name(ret));
         ledc_channels[channel].in_use = false;
         ledc_channels[channel].gpio_num = 0;
@@ -430,11 +479,11 @@ static esp_err_t gpio_set_pwm(uint8_t pin, uint8_t duty_cycle, uint8_t freq_pres
         .channel = (ledc_channel_t)channel,
         .intr_type = LEDC_INTR_DISABLE,
         .timer_sel = LEDC_TIMER_NUM,
-        .duty = duty_cycle,  // 8 ビット値 (0-255)
-        .hpoint = 0
-    };
+        .duty = duty_cycle, // 8 ビット値 (0-255)
+        .hpoint = 0};
     ret = ledc_channel_config(&channel_conf);
-    if (ret != ESP_OK) {
+    if (ret != ESP_OK)
+    {
         ESP_LOGE(TAG, "LEDC channel config failed: %s", esp_err_to_name(ret));
         ledc_channels[channel].in_use = false;
         ledc_channels[channel].gpio_num = 0;
@@ -464,13 +513,15 @@ static void adc_module_init(void)
         .unit_id = ADC_UNIT_1,
     };
     esp_err_t ret = adc_oneshot_new_unit(&init_config, &adc1_handle);
-    if (ret != ESP_OK) {
+    if (ret != ESP_OK)
+    {
         ESP_LOGE(TAG, "ADC1 ユニット初期化に失敗しました: %s", esp_err_to_name(ret));
         return;
     }
 
     // ADC 設定の初期化
-    for (int i = 0; i < 40; i++) {
+    for (int i = 0; i < 40; i++)
+    {
         adc_configs[i].channel = -1;
         adc_configs[i].attenuation = ADC_ATTEN_DB_12;
         adc_configs[i].calibrated = false;
@@ -482,24 +533,28 @@ static void adc_module_init(void)
 
 static adc_channel_t gpio_to_adc1_channel(uint8_t gpio_num)
 {
-    for (int i = 0; i < ADC1_GPIO_MAP_SIZE; i++) {
-        if (adc1_gpio_map[i].gpio_num == gpio_num) {
+    for (int i = 0; i < ADC1_GPIO_MAP_SIZE; i++)
+    {
+        if (adc1_gpio_map[i].gpio_num == gpio_num)
+        {
             return adc1_gpio_map[i].channel;
         }
     }
-    return -1;  // ADC1 に対応していない
+    return -1; // ADC1 に対応していない
 }
 
 static esp_err_t gpio_enable_adc(uint8_t pin, uint8_t atten_param)
 {
     // パラメータ検証
     adc_channel_t channel = gpio_to_adc1_channel(pin);
-    if (channel < 0) {
+    if (channel < 0)
+    {
         ESP_LOGE(TAG, "GPIO%d は ADC1 に対応していません (対応ピン: 32, 33, 34, 35, 36, 39)", pin);
         return ESP_ERR_INVALID_ARG;
     }
 
-    if (atten_param >= ADC_ATTEN_MAP_SIZE) {
+    if (atten_param >= ADC_ATTEN_MAP_SIZE)
+    {
         ESP_LOGE(TAG, "無効な減衰率パラメータ: %d (最大: %d)", atten_param, ADC_ATTEN_MAP_SIZE - 1);
         return ESP_ERR_INVALID_ARG;
     }
@@ -509,12 +564,14 @@ static esp_err_t gpio_enable_adc(uint8_t pin, uint8_t atten_param)
     bleio_mode_state_t prev_mode = gpio_states[pin].mode;
     portEXIT_CRITICAL(&gpio_states_mux);
 
-    if (prev_mode == BLEIO_MODE_PWM) {
+    if (prev_mode == BLEIO_MODE_PWM)
+    {
         free_ledc_channel(pin);
     }
 
     // 既存のキャリブレーションハンドルを削除
-    if (adc_configs[pin].cali_handle != NULL) {
+    if (adc_configs[pin].cali_handle != NULL)
+    {
         adc_cali_delete_scheme_line_fitting(adc_configs[pin].cali_handle);
         adc_configs[pin].cali_handle = NULL;
         adc_configs[pin].calibrated = false;
@@ -527,7 +584,8 @@ static esp_err_t gpio_enable_adc(uint8_t pin, uint8_t atten_param)
         .atten = attenuation,
     };
     esp_err_t ret = adc_oneshot_config_channel(adc1_handle, channel, &config);
-    if (ret != ESP_OK) {
+    if (ret != ESP_OK)
+    {
         ESP_LOGE(TAG, "ADC チャネル設定に失敗しました: %s", esp_err_to_name(ret));
         return ret;
     }
@@ -551,9 +609,9 @@ static esp_err_t gpio_enable_adc(uint8_t pin, uint8_t atten_param)
     portEXIT_CRITICAL(&gpio_states_mux);
 
     const char *range_str =
-        (atten_param == 0) ? "0-1.1V" :
-        (atten_param == 1) ? "0-1.5V" :
-        (atten_param == 2) ? "0-2.2V" : "0-3.3V";
+        (atten_param == 0) ? "0-1.1V" : (atten_param == 1) ? "0-1.5V"
+                                    : (atten_param == 2)   ? "0-2.2V"
+                                                           : "0-3.3V";
 
     ESP_LOGI(TAG, "GPIO%d を ADC モードに設定しました (チャネル: %d, 減衰: %d dB, 範囲: %s, キャリブレーション: %s)",
              pin, channel, atten_param, range_str, calibrated ? "成功" : "失敗");
@@ -567,13 +625,15 @@ static esp_err_t gpio_disable_adc(uint8_t pin)
     bleio_mode_state_t mode = gpio_states[pin].mode;
     portEXIT_CRITICAL(&gpio_states_mux);
 
-    if (mode != BLEIO_MODE_ADC) {
+    if (mode != BLEIO_MODE_ADC)
+    {
         ESP_LOGW(TAG, "GPIO%d は ADC モードではありません", pin);
         return ESP_OK;
     }
 
     // キャリブレーションハンドルを削除
-    if (adc_configs[pin].cali_handle != NULL) {
+    if (adc_configs[pin].cali_handle != NULL)
+    {
         adc_cali_delete_scheme_line_fitting(adc_configs[pin].cali_handle);
         adc_configs[pin].cali_handle = NULL;
     }
@@ -594,7 +654,8 @@ static uint16_t read_adc_value(uint8_t pin)
 {
     adc_config_t *config = &adc_configs[pin];
 
-    if (config->channel < 0) {
+    if (config->channel < 0)
+    {
         ESP_LOGW(TAG, "GPIO%d は ADC モードではありません", pin);
         return 0;
     }
@@ -602,22 +663,25 @@ static uint16_t read_adc_value(uint8_t pin)
     // 生の ADC 値を読み取り
     int raw = 0;
     esp_err_t ret = adc_oneshot_read(adc1_handle, config->channel, &raw);
-    if (ret != ESP_OK) {
+    if (ret != ESP_OK)
+    {
         ESP_LOGE(TAG, "GPIO%d の ADC 読み取りに失敗しました: %s", pin, esp_err_to_name(ret));
         return 0;
     }
 
     // キャリブレーションが有効な場合は補正された値を使用
-    if (config->calibrated && config->cali_handle != NULL) {
+    if (config->calibrated && config->cali_handle != NULL)
+    {
         int voltage = 0;
         ret = adc_cali_raw_to_voltage(config->cali_handle, raw, &voltage);
-        if (ret == ESP_OK) {
+        if (ret == ESP_OK)
+        {
             // 電圧 (mV) を ADC 値に逆変換 (0-4095)
             // 減衰率に応じた最大電圧で正規化
             uint32_t max_voltage =
-                (config->attenuation == ADC_ATTEN_DB_0) ? 1100 :
-                (config->attenuation == ADC_ATTEN_DB_2_5) ? 1500 :
-                (config->attenuation == ADC_ATTEN_DB_6) ? 2200 : 3300;
+                (config->attenuation == ADC_ATTEN_DB_0) ? 1100 : (config->attenuation == ADC_ATTEN_DB_2_5) ? 1500
+                                                             : (config->attenuation == ADC_ATTEN_DB_6)     ? 2200
+                                                                                                           : 3300;
 
             uint16_t normalized = (voltage * 4095) / max_voltage;
             return (normalized > 4095) ? 4095 : normalized;
@@ -627,8 +691,10 @@ static uint16_t read_adc_value(uint8_t pin)
     return (uint16_t)raw;
 }
 
-static esp_err_t gpio_set_mode(uint8_t pin, uint8_t command, uint8_t latch_mode) {
-    if (!is_valid_gpio(pin)) {
+static esp_err_t gpio_set_mode(uint8_t pin, uint8_t command, uint8_t latch_mode)
+{
+    if (!is_valid_gpio(pin))
+    {
         ESP_LOGE(TAG, "Invalid GPIO pin: %d", pin);
         return ESP_ERR_INVALID_ARG;
     }
@@ -643,74 +709,80 @@ static esp_err_t gpio_set_mode(uint8_t pin, uint8_t command, uint8_t latch_mode)
 
     bleio_gpio_state_t *state = &gpio_states[pin];
 
-    switch (command) {
-        case CMD_SET_OUTPUT:
-            io_conf.mode = GPIO_MODE_OUTPUT;
-            gpio_config(&io_conf);
-            // 前回が HIGH なら HIGH を維持、それ以外は LOW にする
-            portENTER_CRITICAL(&gpio_states_mux);
-            bleio_mode_state_t prev_mode = state->mode;
-            portEXIT_CRITICAL(&gpio_states_mux);
+    switch (command)
+    {
+    case CMD_SET_OUTPUT:
+        io_conf.mode = GPIO_MODE_OUTPUT;
+        gpio_config(&io_conf);
+        // 前回が HIGH なら HIGH を維持、それ以外は LOW にする
+        portENTER_CRITICAL(&gpio_states_mux);
+        bleio_mode_state_t prev_mode = state->mode;
+        portEXIT_CRITICAL(&gpio_states_mux);
 
-            if (prev_mode == BLEIO_MODE_OUTPUT_HIGH) {
-                gpio_set_level(pin, 1);
-                ESP_LOGI(TAG, "Set GPIO%d to OUTPUT (maintain HIGH)", pin);
-            } else {
-                gpio_set_level(pin, 0);
-                portENTER_CRITICAL(&gpio_states_mux);
-                state->mode = BLEIO_MODE_OUTPUT_LOW;
-                portEXIT_CRITICAL(&gpio_states_mux);
-                ESP_LOGI(TAG, "Set GPIO%d to OUTPUT (set to LOW)", pin);
-            }
-            break;
-        case CMD_SET_INPUT_FLOATING:
-            io_conf.mode = GPIO_MODE_INPUT;
-            gpio_config(&io_conf);
+        if (prev_mode == BLEIO_MODE_OUTPUT_HIGH)
+        {
+            gpio_set_level(pin, 1);
+            ESP_LOGI(TAG, "Set GPIO%d to OUTPUT (maintain HIGH)", pin);
+        }
+        else
+        {
+            gpio_set_level(pin, 0);
             portENTER_CRITICAL(&gpio_states_mux);
-            state->mode = BLEIO_MODE_INPUT_FLOATING;
-            state->latch_mode = latch_mode;
-            state->is_latched = false;
-            state->stable_counter = 0;
-            state->last_level = 0;
+            state->mode = BLEIO_MODE_OUTPUT_LOW;
             portEXIT_CRITICAL(&gpio_states_mux);
-            ESP_LOGI(TAG, "Set GPIO%d to INPUT_FLOATING (latch_mode=%d)", pin, latch_mode);
-            break;
-        case CMD_SET_INPUT_PULLUP:
-            io_conf.mode = GPIO_MODE_INPUT;
-            io_conf.pull_up_en = GPIO_PULLUP_ENABLE;
-            gpio_config(&io_conf);
-            portENTER_CRITICAL(&gpio_states_mux);
-            state->mode = BLEIO_MODE_INPUT_PULLUP;
-            state->latch_mode = latch_mode;
-            state->is_latched = false;
-            state->stable_counter = 0;
-            state->last_level = 0;
-            portEXIT_CRITICAL(&gpio_states_mux);
-            ESP_LOGI(TAG, "Set GPIO%d to INPUT_PULLUP (latch_mode=%d)", pin, latch_mode);
-            break;
-        case CMD_SET_INPUT_PULLDOWN:
-            io_conf.mode = GPIO_MODE_INPUT;
-            io_conf.pull_down_en = GPIO_PULLDOWN_ENABLE;
-            gpio_config(&io_conf);
-            portENTER_CRITICAL(&gpio_states_mux);
-            state->mode = BLEIO_MODE_INPUT_PULLDOWN;
-            state->latch_mode = latch_mode;
-            state->is_latched = false;
-            state->stable_counter = 0;
-            state->last_level = 0;
-            portEXIT_CRITICAL(&gpio_states_mux);
-            ESP_LOGI(TAG, "Set GPIO%d to INPUT_PULLDOWN (latch_mode=%d)", pin, latch_mode);
-            break;
-        default:
-            ESP_LOGE(TAG, "Invalid mode command: %d", command);
-            return ESP_ERR_INVALID_ARG;
+            ESP_LOGI(TAG, "Set GPIO%d to OUTPUT (set to LOW)", pin);
+        }
+        break;
+    case CMD_SET_INPUT_FLOATING:
+        io_conf.mode = GPIO_MODE_INPUT;
+        gpio_config(&io_conf);
+        portENTER_CRITICAL(&gpio_states_mux);
+        state->mode = BLEIO_MODE_INPUT_FLOATING;
+        state->latch_mode = latch_mode;
+        state->is_latched = false;
+        state->stable_counter = 0;
+        state->last_level = 0;
+        portEXIT_CRITICAL(&gpio_states_mux);
+        ESP_LOGI(TAG, "Set GPIO%d to INPUT_FLOATING (latch_mode=%d)", pin, latch_mode);
+        break;
+    case CMD_SET_INPUT_PULLUP:
+        io_conf.mode = GPIO_MODE_INPUT;
+        io_conf.pull_up_en = GPIO_PULLUP_ENABLE;
+        gpio_config(&io_conf);
+        portENTER_CRITICAL(&gpio_states_mux);
+        state->mode = BLEIO_MODE_INPUT_PULLUP;
+        state->latch_mode = latch_mode;
+        state->is_latched = false;
+        state->stable_counter = 0;
+        state->last_level = 0;
+        portEXIT_CRITICAL(&gpio_states_mux);
+        ESP_LOGI(TAG, "Set GPIO%d to INPUT_PULLUP (latch_mode=%d)", pin, latch_mode);
+        break;
+    case CMD_SET_INPUT_PULLDOWN:
+        io_conf.mode = GPIO_MODE_INPUT;
+        io_conf.pull_down_en = GPIO_PULLDOWN_ENABLE;
+        gpio_config(&io_conf);
+        portENTER_CRITICAL(&gpio_states_mux);
+        state->mode = BLEIO_MODE_INPUT_PULLDOWN;
+        state->latch_mode = latch_mode;
+        state->is_latched = false;
+        state->stable_counter = 0;
+        state->last_level = 0;
+        portEXIT_CRITICAL(&gpio_states_mux);
+        ESP_LOGI(TAG, "Set GPIO%d to INPUT_PULLDOWN (latch_mode=%d)", pin, latch_mode);
+        break;
+    default:
+        ESP_LOGE(TAG, "Invalid mode command: %d", command);
+        return ESP_ERR_INVALID_ARG;
     }
 
     return ESP_OK;
 }
 
-static esp_err_t gpio_write_level(uint8_t pin, uint8_t command) {
-    if (!is_valid_gpio(pin)) {
+static esp_err_t gpio_write_level(uint8_t pin, uint8_t command)
+{
+    if (!is_valid_gpio(pin))
+    {
         ESP_LOGE(TAG, "Invalid GPIO pin: %d", pin);
         return ESP_ERR_INVALID_ARG;
     }
@@ -730,20 +802,21 @@ static esp_err_t gpio_write_level(uint8_t pin, uint8_t command) {
     uint32_t level;
     bleio_mode_state_t new_mode;
 
-    switch (command) {
-        case CMD_WRITE_LOW:
-            level = 0;
-            new_mode = BLEIO_MODE_OUTPUT_LOW;
-            ESP_LOGI(TAG, "Write GPIO%d to LOW", pin);
-            break;
-        case CMD_WRITE_HIGH:
-            level = 1;
-            new_mode = BLEIO_MODE_OUTPUT_HIGH;
-            ESP_LOGI(TAG, "Write GPIO%d to HIGH", pin);
-            break;
-        default:
-            ESP_LOGE(TAG, "Invalid write command: %d", command);
-            return ESP_ERR_INVALID_ARG;
+    switch (command)
+    {
+    case CMD_WRITE_LOW:
+        level = 0;
+        new_mode = BLEIO_MODE_OUTPUT_LOW;
+        ESP_LOGI(TAG, "Write GPIO%d to LOW", pin);
+        break;
+    case CMD_WRITE_HIGH:
+        level = 1;
+        new_mode = BLEIO_MODE_OUTPUT_HIGH;
+        ESP_LOGI(TAG, "Write GPIO%d to HIGH", pin);
+        break;
+    default:
+        ESP_LOGE(TAG, "Invalid write command: %d", command);
+        return ESP_ERR_INVALID_ARG;
     }
 
     portENTER_CRITICAL(&gpio_states_mux);
@@ -753,8 +826,10 @@ static esp_err_t gpio_write_level(uint8_t pin, uint8_t command) {
     return gpio_set_level(pin, level);
 }
 
-static esp_err_t gpio_start_blink(uint8_t pin, uint8_t command) {
-    if (!is_valid_gpio(pin)) {
+static esp_err_t gpio_start_blink(uint8_t pin, uint8_t command)
+{
+    if (!is_valid_gpio(pin))
+    {
         ESP_LOGE(TAG, "Invalid GPIO pin: %d", pin);
         return ESP_ERR_INVALID_ARG;
     }
@@ -773,24 +848,24 @@ static esp_err_t gpio_start_blink(uint8_t pin, uint8_t command) {
     bleio_gpio_state_t *state = &gpio_states[pin];
     bleio_mode_state_t new_mode;
 
-    switch (command) {
-        case CMD_BLINK_250MS:
-            new_mode = BLEIO_MODE_BLINK_250MS;
-            ESP_LOGI(TAG, "Start GPIO%d blinking at 250ms", pin);
-            break;
-        case CMD_BLINK_500MS:
-            new_mode = BLEIO_MODE_BLINK_500MS;
-            ESP_LOGI(TAG, "Start GPIO%d blinking at 500ms", pin);
-            break;
-        default:
-            ESP_LOGE(TAG, "Invalid blink command: %d", command);
-            return ESP_ERR_INVALID_ARG;
+    switch (command)
+    {
+    case CMD_BLINK_250MS:
+        new_mode = BLEIO_MODE_BLINK_250MS;
+        ESP_LOGI(TAG, "Start GPIO%d blinking at 250ms", pin);
+        break;
+    case CMD_BLINK_500MS:
+        new_mode = BLEIO_MODE_BLINK_500MS;
+        ESP_LOGI(TAG, "Start GPIO%d blinking at 500ms", pin);
+        break;
+    default:
+        ESP_LOGE(TAG, "Invalid blink command: %d", command);
+        return ESP_ERR_INVALID_ARG;
     }
 
     portENTER_CRITICAL(&gpio_states_mux);
     state->mode = new_mode;
     state->current_level = 0;
-    state->blink_counter = 0;
     portEXIT_CRITICAL(&gpio_states_mux);
 
     gpio_set_level(pin, 0);
@@ -799,8 +874,10 @@ static esp_err_t gpio_start_blink(uint8_t pin, uint8_t command) {
 
 // BLE キャラクタリスティック コールバック
 static int gatt_svr_chr_write_cb(uint16_t conn_handle, uint16_t attr_handle,
-                                  struct ble_gatt_access_ctxt *ctxt, void *arg) {
-    if (ctxt->op != BLE_GATT_ACCESS_OP_WRITE_CHR) {
+                                 struct ble_gatt_access_ctxt *ctxt, void *arg)
+{
+    if (ctxt->op != BLE_GATT_ACCESS_OP_WRITE_CHR)
+    {
         return BLE_ATT_ERR_UNLIKELY;
     }
 
@@ -808,7 +885,8 @@ static int gatt_svr_chr_write_cb(uint16_t conn_handle, uint16_t attr_handle,
     uint16_t len = OS_MBUF_PKTLEN(om);
 
     // 最小長チェック: 1 (コマンド個数) + 4 (最低1コマンド)
-    if (len < 5) {
+    if (len < 5)
+    {
         ESP_LOGE(TAG, "Invalid write length: %d (minimum 5)", len);
         return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
     }
@@ -818,7 +896,8 @@ static int gatt_svr_chr_write_cb(uint16_t conn_handle, uint16_t attr_handle,
 
     // パケット長チェック
     uint16_t expected_len = 1 + (cmd_count * 4);
-    if (len != expected_len) {
+    if (len != expected_len)
+    {
         ESP_LOGE(TAG, "Invalid packet length: %d (expected %d for %d commands)",
                  len, expected_len, cmd_count);
         return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
@@ -827,7 +906,8 @@ static int gatt_svr_chr_write_cb(uint16_t conn_handle, uint16_t attr_handle,
     ESP_LOGI(TAG, "Received %d commands", cmd_count);
 
     // 各コマンドを処理
-    for (int i = 0; i < cmd_count; i++) {
+    for (int i = 0; i < cmd_count; i++)
+    {
         uint8_t cmd_data[4];
         os_mbuf_copydata(om, 1 + (i * 4), 4, cmd_data);
 
@@ -840,24 +920,38 @@ static int gatt_svr_chr_write_cb(uint16_t conn_handle, uint16_t attr_handle,
                  i + 1, pin, command, param1, param2);
 
         esp_err_t ret;
-        if (command <= CMD_SET_INPUT_PULLDOWN) {
-            ret = gpio_set_mode(pin, command, param1);  // param1 = latch_mode
-        } else if (command == CMD_WRITE_LOW || command == CMD_WRITE_HIGH) {
+        if (command <= CMD_SET_INPUT_PULLDOWN)
+        {
+            ret = gpio_set_mode(pin, command, param1); // param1 = latch_mode
+        }
+        else if (command == CMD_WRITE_LOW || command == CMD_WRITE_HIGH)
+        {
             ret = gpio_write_level(pin, command);
-        } else if (command == CMD_BLINK_500MS || command == CMD_BLINK_250MS) {
+        }
+        else if (command == CMD_BLINK_500MS || command == CMD_BLINK_250MS)
+        {
             ret = gpio_start_blink(pin, command);
-        } else if (command == CMD_SET_PWM) {
-            ret = gpio_set_pwm(pin, param1, param2);  // param1 = duty_cycle, param2 = freq_preset
-        } else if (command == CMD_SET_ADC_ENABLE) {
-            ret = gpio_enable_adc(pin, param1);  // param1 = attenuation
-        } else if (command == CMD_SET_ADC_DISABLE) {
+        }
+        else if (command == CMD_SET_PWM)
+        {
+            ret = gpio_set_pwm(pin, param1, param2); // param1 = duty_cycle, param2 = freq_preset
+        }
+        else if (command == CMD_SET_ADC_ENABLE)
+        {
+            ret = gpio_enable_adc(pin, param1); // param1 = attenuation
+        }
+        else if (command == CMD_SET_ADC_DISABLE)
+        {
             ret = gpio_disable_adc(pin);
-        } else {
+        }
+        else
+        {
             ESP_LOGE(TAG, "Unknown command: %d", command);
             return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
         }
 
-        if (ret != ESP_OK) {
+        if (ret != ESP_OK)
+        {
             ESP_LOGE(TAG, "Command %d failed", i + 1);
             return BLE_ATT_ERR_UNLIKELY;
         }
@@ -867,15 +961,19 @@ static int gatt_svr_chr_write_cb(uint16_t conn_handle, uint16_t attr_handle,
 }
 
 static int gatt_svr_chr_read_cb(uint16_t conn_handle, uint16_t attr_handle,
-                                struct ble_gatt_access_ctxt *ctxt, void *arg) {
-    if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) {
+                                struct ble_gatt_access_ctxt *ctxt, void *arg)
+{
+    if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR)
+    {
         // READ 操作: すべての入力モード設定済みピンの状態を返す
-        uint8_t buffer[1 + MAX_USABLE_GPIO * 2];  // 1 (カウント) + 24 * 2 (ピン番号と状態) = 49 バイト
+        uint8_t buffer[1 + MAX_USABLE_GPIO * 2]; // 1 (カウント) + 24 * 2 (ピン番号と状態) = 49 バイト
         uint8_t count = 0;
 
         // すべての GPIO をスキャンして、入力モードのピンを収集
-        for (int pin = 0; pin < 40; pin++) {
-            if (!is_valid_gpio(pin)) {
+        for (int pin = 0; pin < 40; pin++)
+        {
+            if (!is_valid_gpio(pin))
+            {
                 continue;
             }
 
@@ -889,20 +987,27 @@ static int gatt_svr_chr_read_cb(uint16_t conn_handle, uint16_t attr_handle,
             // 入力モードかチェック
             if (mode == BLEIO_MODE_INPUT_FLOATING ||
                 mode == BLEIO_MODE_INPUT_PULLUP ||
-                mode == BLEIO_MODE_INPUT_PULLDOWN) {
+                mode == BLEIO_MODE_INPUT_PULLDOWN)
+            {
 
                 uint8_t level;
 
                 // ラッチモードの処理
-                if (latch_mode == LATCH_MODE_NONE) {
+                if (latch_mode == LATCH_MODE_NONE)
+                {
                     // ラッチなし: 現在の GPIO レベルをそのまま返す
                     level = gpio_get_level(pin);
-                } else {
+                }
+                else
+                {
                     // ラッチあり
-                    if (is_latched) {
+                    if (is_latched)
+                    {
                         // ラッチ済み: ターゲット値を返す
                         level = (latch_mode == LATCH_MODE_HIGH) ? 1 : 0;
-                    } else {
+                    }
+                    else
+                    {
                         // 未ラッチ: ターゲット値の逆を返す (過渡状態での誤検出を避ける)
                         level = (latch_mode == LATCH_MODE_HIGH) ? 0 : 1;
                     }
@@ -930,15 +1035,19 @@ static int gatt_svr_chr_read_cb(uint16_t conn_handle, uint16_t attr_handle,
 }
 
 static int gatt_svr_chr_adc_read_cb(uint16_t conn_handle, uint16_t attr_handle,
-                                     struct ble_gatt_access_ctxt *ctxt, void *arg) {
-    if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) {
+                                    struct ble_gatt_access_ctxt *ctxt, void *arg)
+{
+    if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR)
+    {
         // READ 操作: すべての ADC モード設定済みピンの値を返す
-        uint8_t buffer[1 + MAX_USABLE_GPIO * 3];  // 1 (カウント) + 24 * 3 (ピン番号と ADC 値) = 73 バイト
+        uint8_t buffer[1 + MAX_USABLE_GPIO * 3]; // 1 (カウント) + 24 * 3 (ピン番号と ADC 値) = 73 バイト
         uint8_t count = 0;
 
         // すべての GPIO をスキャンして、ADC モードのピンを収集
-        for (int pin = 0; pin < 40; pin++) {
-            if (!is_valid_gpio(pin)) {
+        for (int pin = 0; pin < 40; pin++)
+        {
+            if (!is_valid_gpio(pin))
+            {
                 continue;
             }
 
@@ -947,7 +1056,8 @@ static int gatt_svr_chr_adc_read_cb(uint16_t conn_handle, uint16_t attr_handle,
             portEXIT_CRITICAL(&gpio_states_mux);
 
             // ADC モードかチェック
-            if (mode == BLEIO_MODE_ADC) {
+            if (mode == BLEIO_MODE_ADC)
+            {
                 uint16_t adc_value = read_adc_value(pin);
 
                 buffer[1 + count * 3] = pin;
@@ -976,7 +1086,7 @@ static const struct ble_gatt_svc_def gatt_svr_svcs[] = {
     {
         .type = BLE_GATT_SVC_TYPE_PRIMARY,
         .uuid = &gatt_svr_svc_uuid.u,
-        .characteristics = (struct ble_gatt_chr_def[]) {
+        .characteristics = (struct ble_gatt_chr_def[]){
             {
                 // GPIO 書き込みキャラクタリスティック
                 .uuid = &gatt_svr_chr_write_uuid.u,
@@ -997,8 +1107,7 @@ static const struct ble_gatt_svc_def gatt_svr_svcs[] = {
             },
             {
                 0, // 終端
-            }
-        },
+            }},
     },
     {
         0, // 終端
@@ -1006,31 +1115,35 @@ static const struct ble_gatt_svc_def gatt_svr_svcs[] = {
 };
 
 // BLE イベントハンドラ
-static int ble_gap_event(struct ble_gap_event *event, void *arg) {
-    switch (event->type) {
-        case BLE_GAP_EVENT_CONNECT:
-            ESP_LOGI(TAG, "BLE connection %s; status=%d",
-                     event->connect.status == 0 ? "established" : "failed",
-                     event->connect.status);
-            if (event->connect.status == 0) {
-                conn_handle = event->connect.conn_handle;
-            }
-            break;
-        case BLE_GAP_EVENT_DISCONNECT:
-            ESP_LOGI(TAG, "BLE disconnect; reason=%d", event->disconnect.reason);
-            conn_handle = 0;
-            // 再度アドバタイズを開始
-            ble_app_advertise();
-            break;
-        case BLE_GAP_EVENT_ADV_COMPLETE:
-            ESP_LOGI(TAG, "BLE advertise complete");
-            break;
+static int ble_gap_event(struct ble_gap_event *event, void *arg)
+{
+    switch (event->type)
+    {
+    case BLE_GAP_EVENT_CONNECT:
+        ESP_LOGI(TAG, "BLE connection %s; status=%d",
+                 event->connect.status == 0 ? "established" : "failed",
+                 event->connect.status);
+        if (event->connect.status == 0)
+        {
+            conn_handle = event->connect.conn_handle;
+        }
+        break;
+    case BLE_GAP_EVENT_DISCONNECT:
+        ESP_LOGI(TAG, "BLE disconnect; reason=%d", event->disconnect.reason);
+        conn_handle = 0;
+        // 再度アドバタイズを開始
+        ble_app_advertise();
+        break;
+    case BLE_GAP_EVENT_ADV_COMPLETE:
+        ESP_LOGI(TAG, "BLE advertise complete");
+        break;
     }
     return 0;
 }
 
 // BLE アドバタイズ開始
-static void ble_app_advertise(void) {
+static void ble_app_advertise(void)
+{
     struct ble_hs_adv_fields fields;
     memset(&fields, 0, sizeof(fields));
 
@@ -1045,32 +1158,36 @@ static void ble_app_advertise(void) {
     memset(&adv_params, 0, sizeof(adv_params));
     adv_params.conn_mode = BLE_GAP_CONN_MODE_UND;
     adv_params.disc_mode = BLE_GAP_DISC_MODE_GEN;
-    adv_params.itvl_min = BLE_GAP_ADV_FAST_INTERVAL1_MIN;  // 30ms
-    adv_params.itvl_max = BLE_GAP_ADV_FAST_INTERVAL1_MAX;  // 60ms
+    adv_params.itvl_min = BLE_GAP_ADV_FAST_INTERVAL1_MIN; // 30ms
+    adv_params.itvl_max = BLE_GAP_ADV_FAST_INTERVAL1_MAX; // 60ms
 
     ble_gap_adv_start(BLE_OWN_ADDR_PUBLIC, NULL, BLE_HS_FOREVER,
                       &adv_params, ble_gap_event, NULL);
 }
 
 // BLE 同期コールバック
-static void ble_app_on_sync(void) {
+static void ble_app_on_sync(void)
+{
     ESP_LOGI(TAG, "BLE host synchronized");
     ble_hs_util_ensure_addr(0);
     ble_app_advertise();
 }
 
 // BLE ホストタスク
-static void ble_host_task(void *param) {
+static void ble_host_task(void *param)
+{
     nimble_port_run();
     nimble_port_freertos_deinit();
 }
 
-void app_main(void) {
+void app_main(void)
+{
     ESP_LOGI(TAG, "Starting BLEIO-ESP32 Service");
 
     // NVS 初期化
     esp_err_t ret = nvs_flash_init();
-    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND)
+    {
         ESP_ERROR_CHECK(nvs_flash_erase());
         ret = nvs_flash_init();
     }
@@ -1085,19 +1202,17 @@ void app_main(void) {
     // 点滅タイマの初期化 (250ms 周期)
     const esp_timer_create_args_t blink_timer_args = {
         .callback = &blink_timer_callback,
-        .name = "blink_timer"
-    };
+        .name = "blink_timer"};
     ESP_ERROR_CHECK(esp_timer_create(&blink_timer_args, &blink_timer));
-    ESP_ERROR_CHECK(esp_timer_start_periodic(blink_timer, 250000));  // 250ms = 250000us
+    ESP_ERROR_CHECK(esp_timer_start_periodic(blink_timer, 250000)); // 250ms = 250000us
     ESP_LOGI(TAG, "Blink timer started (250ms interval)");
 
     // 入力ポーリングタイマの初期化 (10ms 周期)
     const esp_timer_create_args_t input_poll_timer_args = {
         .callback = &input_poll_timer_callback,
-        .name = "input_poll_timer"
-    };
+        .name = "input_poll_timer"};
     ESP_ERROR_CHECK(esp_timer_create(&input_poll_timer_args, &input_poll_timer));
-    ESP_ERROR_CHECK(esp_timer_start_periodic(input_poll_timer, INPUT_POLL_INTERVAL_MS * 1000));  // 10ms = 10000us
+    ESP_ERROR_CHECK(esp_timer_start_periodic(input_poll_timer, INPUT_POLL_INTERVAL_MS * 1000)); // 10ms = 10000us
     ESP_LOGI(TAG, "Input poll timer started (%dms interval)", INPUT_POLL_INTERVAL_MS);
 
     // NimBLE 初期化
