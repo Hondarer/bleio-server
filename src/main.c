@@ -7,6 +7,9 @@
 #include "nvs_flash.h"
 #include "driver/gpio.h"
 #include "driver/ledc.h"
+#include "esp_adc/adc_oneshot.h"
+#include "esp_adc/adc_cali.h"
+#include "esp_adc/adc_cali_scheme.h"
 
 #include "host/ble_hs.h"
 #include "host/ble_uuid.h"
@@ -31,6 +34,10 @@ static const ble_uuid128_t gatt_svr_chr_read_uuid =
     BLE_UUID128_INIT(0x7e, 0xe8, 0x7b, 0x5d, 0x2e, 0x7a, 0x3d, 0xbf,
                      0x3a, 0x41, 0xf7, 0xd8, 0xe3, 0xd5, 0x95, 0x1c);
 
+static const ble_uuid128_t gatt_svr_chr_adc_read_uuid =
+    BLE_UUID128_INIT(0x1d, 0x0c, 0x9b, 0x8a, 0x7f, 0x6e, 0x5d, 0x8c,
+                     0x1b, 0x4a, 0x9f, 0x4e, 0x3c, 0x7b, 0x8a, 0x2d);
+
 // GPIO コマンド定義
 #define CMD_SET_OUTPUT              0
 #define CMD_SET_INPUT_FLOATING      1
@@ -41,6 +48,8 @@ static const ble_uuid128_t gatt_svr_chr_read_uuid =
 #define CMD_BLINK_500MS             12
 #define CMD_BLINK_250MS             13
 #define CMD_SET_PWM                 20
+#define CMD_SET_ADC_ENABLE          30
+#define CMD_SET_ADC_DISABLE         31
 
 // GPIO 最大数
 #define MAX_USABLE_GPIO             24  // 使用可能な GPIO の総数
@@ -80,7 +89,8 @@ typedef enum {
     BLEIO_MODE_OUTPUT_HIGH,         // HIGH (3.3V) 出力モード
     BLEIO_MODE_BLINK_250MS,         // 250ms 点滅出力モード
     BLEIO_MODE_BLINK_500MS,         // 500ms 点滅出力モード
-    BLEIO_MODE_PWM                  // PWM 出力モード
+    BLEIO_MODE_PWM,                 // PWM 出力モード
+    BLEIO_MODE_ADC                  // ADC 入力モード
 } bleio_mode_state_t;
 
 // PWM 設定保持用構造体
@@ -95,6 +105,14 @@ typedef struct {
     bool in_use;                   // チャネルが使用中か
     uint8_t gpio_num;              // このチャネルを使用している GPIO 番号
 } ledc_channel_info_t;
+
+// ADC 設定保持用構造体
+typedef struct {
+    int8_t channel;                // ADC1 チャネル (-1: 未設定)
+    adc_atten_t attenuation;       // 減衰率
+    bool calibrated;               // キャリブレーション済みか
+    adc_cali_handle_t cali_handle; // キャリブレーションハンドル
+} adc_config_t;
 
 // GPIO ごとの状態管理
 typedef struct {
@@ -120,11 +138,36 @@ static const uint32_t pwm_freq_table[] = {
 };
 #define PWM_FREQ_TABLE_SIZE (sizeof(pwm_freq_table) / sizeof(pwm_freq_table[0]))
 
+// GPIO から ADC1 チャネルへのマッピングテーブル
+static const struct {
+    uint8_t gpio_num;
+    adc_channel_t channel;
+} adc1_gpio_map[] = {
+    {32, ADC_CHANNEL_4},
+    {33, ADC_CHANNEL_5},
+    {34, ADC_CHANNEL_6},
+    {35, ADC_CHANNEL_7},
+    {36, ADC_CHANNEL_0},
+    {39, ADC_CHANNEL_3}
+};
+#define ADC1_GPIO_MAP_SIZE (sizeof(adc1_gpio_map) / sizeof(adc1_gpio_map[0]))
+
+// 減衰率マッピングテーブル
+static const adc_atten_t adc_atten_map[] = {
+    ADC_ATTEN_DB_0,    // 0: 0 dB (0-1.1V)
+    ADC_ATTEN_DB_2_5,  // 1: 2.5 dB (0-1.5V)
+    ADC_ATTEN_DB_6,    // 2: 6 dB (0-2.2V)
+    ADC_ATTEN_DB_12    // 3: 12 dB (0-3.3V、旧 11dB)
+};
+#define ADC_ATTEN_MAP_SIZE (sizeof(adc_atten_map) / sizeof(adc_atten_map[0]))
+
 // グローバル変数
 static uint16_t conn_handle = 0;
 static bleio_gpio_state_t gpio_states[40] = {0};  // 全 GPIO の状態
 static pwm_config_t pwm_configs[40] = {0};        // 全 GPIO の PWM 設定
 static ledc_channel_info_t ledc_channels[LEDC_CHANNEL_MAX] = {0};  // LEDC チャネル管理
+static adc_config_t adc_configs[40] = {0};        // 全 GPIO の ADC 設定
+static adc_oneshot_unit_handle_t adc1_handle = NULL;  // ADC1 ユニットハンドル
 static esp_timer_handle_t blink_timer = NULL;
 static esp_timer_handle_t input_poll_timer = NULL;
 static portMUX_TYPE gpio_states_mux = portMUX_INITIALIZER_UNLOCKED;  // gpio_states 保護用スピンロック
@@ -413,6 +456,177 @@ static esp_err_t gpio_set_pwm(uint8_t pin, uint8_t duty_cycle, uint8_t freq_pres
     return ESP_OK;
 }
 
+// ADC 関連関数
+static void adc_module_init(void)
+{
+    // ADC1 の初期化
+    adc_oneshot_unit_init_cfg_t init_config = {
+        .unit_id = ADC_UNIT_1,
+    };
+    esp_err_t ret = adc_oneshot_new_unit(&init_config, &adc1_handle);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "ADC1 ユニット初期化に失敗しました: %s", esp_err_to_name(ret));
+        return;
+    }
+
+    // ADC 設定の初期化
+    for (int i = 0; i < 40; i++) {
+        adc_configs[i].channel = -1;
+        adc_configs[i].attenuation = ADC_ATTEN_DB_12;
+        adc_configs[i].calibrated = false;
+        adc_configs[i].cali_handle = NULL;
+    }
+
+    ESP_LOGI(TAG, "ADC module initialized (12-bit resolution, ADC1 only)");
+}
+
+static adc_channel_t gpio_to_adc1_channel(uint8_t gpio_num)
+{
+    for (int i = 0; i < ADC1_GPIO_MAP_SIZE; i++) {
+        if (adc1_gpio_map[i].gpio_num == gpio_num) {
+            return adc1_gpio_map[i].channel;
+        }
+    }
+    return -1;  // ADC1 に対応していない
+}
+
+static esp_err_t gpio_enable_adc(uint8_t pin, uint8_t atten_param)
+{
+    // パラメータ検証
+    adc_channel_t channel = gpio_to_adc1_channel(pin);
+    if (channel < 0) {
+        ESP_LOGE(TAG, "GPIO%d は ADC1 に対応していません (対応ピン: 32, 33, 34, 35, 36, 39)", pin);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (atten_param >= ADC_ATTEN_MAP_SIZE) {
+        ESP_LOGE(TAG, "無効な減衰率パラメータ: %d (最大: %d)", atten_param, ADC_ATTEN_MAP_SIZE - 1);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    // 既存のモードをクリーンアップ
+    portENTER_CRITICAL(&gpio_states_mux);
+    bleio_mode_state_t prev_mode = gpio_states[pin].mode;
+    portEXIT_CRITICAL(&gpio_states_mux);
+
+    if (prev_mode == BLEIO_MODE_PWM) {
+        free_ledc_channel(pin);
+    }
+
+    // 既存のキャリブレーションハンドルを削除
+    if (adc_configs[pin].cali_handle != NULL) {
+        adc_cali_delete_scheme_line_fitting(adc_configs[pin].cali_handle);
+        adc_configs[pin].cali_handle = NULL;
+        adc_configs[pin].calibrated = false;
+    }
+
+    // ADC チャネルの設定
+    adc_atten_t attenuation = adc_atten_map[atten_param];
+    adc_oneshot_chan_cfg_t config = {
+        .bitwidth = ADC_BITWIDTH_12,
+        .atten = attenuation,
+    };
+    esp_err_t ret = adc_oneshot_config_channel(adc1_handle, channel, &config);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "ADC チャネル設定に失敗しました: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    // キャリブレーションの設定
+    adc_cali_line_fitting_config_t cali_config = {
+        .unit_id = ADC_UNIT_1,
+        .atten = attenuation,
+        .bitwidth = ADC_BITWIDTH_12,
+    };
+    ret = adc_cali_create_scheme_line_fitting(&cali_config, &adc_configs[pin].cali_handle);
+    bool calibrated = (ret == ESP_OK);
+
+    // 設定を保存
+    adc_configs[pin].channel = channel;
+    adc_configs[pin].attenuation = attenuation;
+    adc_configs[pin].calibrated = calibrated;
+
+    portENTER_CRITICAL(&gpio_states_mux);
+    gpio_states[pin].mode = BLEIO_MODE_ADC;
+    portEXIT_CRITICAL(&gpio_states_mux);
+
+    const char *range_str =
+        (atten_param == 0) ? "0-1.1V" :
+        (atten_param == 1) ? "0-1.5V" :
+        (atten_param == 2) ? "0-2.2V" : "0-3.3V";
+
+    ESP_LOGI(TAG, "GPIO%d を ADC モードに設定しました (チャネル: %d, 減衰: %d dB, 範囲: %s, キャリブレーション: %s)",
+             pin, channel, atten_param, range_str, calibrated ? "成功" : "失敗");
+
+    return ESP_OK;
+}
+
+static esp_err_t gpio_disable_adc(uint8_t pin)
+{
+    portENTER_CRITICAL(&gpio_states_mux);
+    bleio_mode_state_t mode = gpio_states[pin].mode;
+    portEXIT_CRITICAL(&gpio_states_mux);
+
+    if (mode != BLEIO_MODE_ADC) {
+        ESP_LOGW(TAG, "GPIO%d は ADC モードではありません", pin);
+        return ESP_OK;
+    }
+
+    // キャリブレーションハンドルを削除
+    if (adc_configs[pin].cali_handle != NULL) {
+        adc_cali_delete_scheme_line_fitting(adc_configs[pin].cali_handle);
+        adc_configs[pin].cali_handle = NULL;
+    }
+
+    // 設定をクリア
+    adc_configs[pin].channel = -1;
+    adc_configs[pin].calibrated = false;
+
+    portENTER_CRITICAL(&gpio_states_mux);
+    gpio_states[pin].mode = BLEIO_MODE_UNSET;
+    portEXIT_CRITICAL(&gpio_states_mux);
+
+    ESP_LOGI(TAG, "GPIO%d の ADC モードを無効化しました", pin);
+    return ESP_OK;
+}
+
+static uint16_t read_adc_value(uint8_t pin)
+{
+    adc_config_t *config = &adc_configs[pin];
+
+    if (config->channel < 0) {
+        ESP_LOGW(TAG, "GPIO%d は ADC モードではありません", pin);
+        return 0;
+    }
+
+    // 生の ADC 値を読み取り
+    int raw = 0;
+    esp_err_t ret = adc_oneshot_read(adc1_handle, config->channel, &raw);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "GPIO%d の ADC 読み取りに失敗しました: %s", pin, esp_err_to_name(ret));
+        return 0;
+    }
+
+    // キャリブレーションが有効な場合は補正された値を使用
+    if (config->calibrated && config->cali_handle != NULL) {
+        int voltage = 0;
+        ret = adc_cali_raw_to_voltage(config->cali_handle, raw, &voltage);
+        if (ret == ESP_OK) {
+            // 電圧 (mV) を ADC 値に逆変換 (0-4095)
+            // 減衰率に応じた最大電圧で正規化
+            uint32_t max_voltage =
+                (config->attenuation == ADC_ATTEN_DB_0) ? 1100 :
+                (config->attenuation == ADC_ATTEN_DB_2_5) ? 1500 :
+                (config->attenuation == ADC_ATTEN_DB_6) ? 2200 : 3300;
+
+            uint16_t normalized = (voltage * 4095) / max_voltage;
+            return (normalized > 4095) ? 4095 : normalized;
+        }
+    }
+
+    return (uint16_t)raw;
+}
+
 static esp_err_t gpio_set_mode(uint8_t pin, uint8_t command, uint8_t latch_mode) {
     if (!is_valid_gpio(pin)) {
         ESP_LOGE(TAG, "Invalid GPIO pin: %d", pin);
@@ -634,6 +848,10 @@ static int gatt_svr_chr_write_cb(uint16_t conn_handle, uint16_t attr_handle,
             ret = gpio_start_blink(pin, command);
         } else if (command == CMD_SET_PWM) {
             ret = gpio_set_pwm(pin, param1, param2);  // param1 = duty_cycle, param2 = freq_preset
+        } else if (command == CMD_SET_ADC_ENABLE) {
+            ret = gpio_enable_adc(pin, param1);  // param1 = attenuation
+        } else if (command == CMD_SET_ADC_DISABLE) {
+            ret = gpio_disable_adc(pin);
         } else {
             ESP_LOGE(TAG, "Unknown command: %d", command);
             return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
@@ -711,6 +929,48 @@ static int gatt_svr_chr_read_cb(uint16_t conn_handle, uint16_t attr_handle,
     return BLE_ATT_ERR_UNLIKELY;
 }
 
+static int gatt_svr_chr_adc_read_cb(uint16_t conn_handle, uint16_t attr_handle,
+                                     struct ble_gatt_access_ctxt *ctxt, void *arg) {
+    if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) {
+        // READ 操作: すべての ADC モード設定済みピンの値を返す
+        uint8_t buffer[1 + MAX_USABLE_GPIO * 3];  // 1 (カウント) + 24 * 3 (ピン番号と ADC 値) = 73 バイト
+        uint8_t count = 0;
+
+        // すべての GPIO をスキャンして、ADC モードのピンを収集
+        for (int pin = 0; pin < 40; pin++) {
+            if (!is_valid_gpio(pin)) {
+                continue;
+            }
+
+            portENTER_CRITICAL(&gpio_states_mux);
+            bleio_mode_state_t mode = gpio_states[pin].mode;
+            portEXIT_CRITICAL(&gpio_states_mux);
+
+            // ADC モードかチェック
+            if (mode == BLEIO_MODE_ADC) {
+                uint16_t adc_value = read_adc_value(pin);
+
+                buffer[1 + count * 3] = pin;
+                buffer[1 + count * 3 + 1] = adc_value & 0xFF;        // 下位バイト
+                buffer[1 + count * 3 + 2] = (adc_value >> 8) & 0xFF; // 上位バイト
+                count++;
+
+                ESP_LOGI(TAG, "ADC GPIO%d: %d (0x%03X)", pin, adc_value, adc_value);
+            }
+        }
+
+        buffer[0] = count;
+        uint16_t data_len = 1 + count * 3;
+
+        ESP_LOGI(TAG, "Sending %d ADC values (%d bytes)", count, data_len);
+        int rc = os_mbuf_append(ctxt->om, buffer, data_len);
+        return (rc == 0) ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
+    }
+
+    // WRITE 操作は無効
+    return BLE_ATT_ERR_UNLIKELY;
+}
+
 // GATT サービス定義
 static const struct ble_gatt_svc_def gatt_svr_svcs[] = {
     {
@@ -727,6 +987,12 @@ static const struct ble_gatt_svc_def gatt_svr_svcs[] = {
                 // GPIO 読み取りキャラクタリスティック
                 .uuid = &gatt_svr_chr_read_uuid.u,
                 .access_cb = gatt_svr_chr_read_cb,
+                .flags = BLE_GATT_CHR_F_READ,
+            },
+            {
+                // ADC 読み取りキャラクタリスティック
+                .uuid = &gatt_svr_chr_adc_read_uuid.u,
+                .access_cb = gatt_svr_chr_adc_read_cb,
                 .flags = BLE_GATT_CHR_F_READ,
             },
             {
@@ -812,6 +1078,9 @@ void app_main(void) {
 
     // PWM 初期化
     pwm_init();
+
+    // ADC 初期化
+    adc_module_init();
 
     // 点滅タイマの初期化 (250ms 周期)
     const esp_timer_create_args_t blink_timer_args = {
