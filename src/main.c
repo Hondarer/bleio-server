@@ -39,17 +39,17 @@ static const ble_uuid128_t gatt_svr_chr_adc_read_uuid =
                      0x1b, 0x4a, 0x9f, 0x4e, 0x3c, 0x7b, 0x8a, 0x2d);
 
 // GPIO コマンド定義
-#define CMD_SET_OUTPUT 0
-#define CMD_SET_INPUT_FLOATING 1
-#define CMD_SET_INPUT_PULLUP 2
-#define CMD_SET_INPUT_PULLDOWN 3
-#define CMD_WRITE_LOW 10
-#define CMD_WRITE_HIGH 11
-#define CMD_BLINK_500MS 12
-#define CMD_BLINK_250MS 13
-#define CMD_SET_PWM 20
-#define CMD_SET_ADC_ENABLE 30
-#define CMD_SET_ADC_DISABLE 31
+#define CMD_SET_OUTPUT_LOW 1
+#define CMD_SET_OUTPUT_HIGH 2
+#define CMD_SET_OUTPUT_BLINK_250MS 3
+#define CMD_SET_OUTPUT_BLINK_500MS 4
+#define CMD_SET_OUTPUT_PWM 5
+#define CMD_SET_OUTPUT_ON_DISCONNECT 9
+#define CMD_SET_INPUT_FLOATING 11
+#define CMD_SET_INPUT_PULLUP 12
+#define CMD_SET_INPUT_PULLDOWN 13
+#define CMD_SET_ADC_ENABLE 21
+#define CMD_SET_ADC_DISABLE 22
 
 // GPIO 最大数
 #define MAX_USABLE_GPIO 24 // 使用可能な GPIO の総数
@@ -121,12 +121,13 @@ typedef struct
 // GPIO ごとの状態管理
 typedef struct
 {
-    bleio_mode_state_t mode; // 現在のモード
-    uint8_t current_level;   // 現在の出力レベル (点滅時に使用)
-    uint8_t latch_mode;      // 入力ラッチモード (0-2)
-    bool is_latched;         // ラッチ済みフラグ
-    uint8_t stable_counter;  // 安定カウンタ
-    uint8_t last_level;      // 前回の読み取り値
+    bleio_mode_state_t mode;       // 現在のモード
+    uint8_t current_level;         // 現在の出力レベル (点滅時に使用)
+    uint8_t latch_mode;            // 入力ラッチモード (0-2)
+    bool is_latched;               // ラッチ済みフラグ
+    uint8_t stable_counter;        // 安定カウンタ
+    uint8_t last_level;            // 前回の読み取り値
+    uint8_t disconnect_behavior;   // BLE 切断時の振る舞い (0: 維持, 1: LOW, 2: HIGH)
 } bleio_gpio_state_t;
 
 // 周波数プリセットテーブル (Hz)
@@ -744,28 +745,6 @@ static esp_err_t gpio_set_mode(uint8_t pin, uint8_t command, uint8_t latch_mode)
 
     switch (command)
     {
-    case CMD_SET_OUTPUT:
-        io_conf.mode = GPIO_MODE_OUTPUT;
-        gpio_config(&io_conf);
-        // 前回が HIGH なら HIGH を維持、それ以外は LOW にする
-        portENTER_CRITICAL(&gpio_states_mux);
-        bleio_mode_state_t prev_mode = state->mode;
-        portEXIT_CRITICAL(&gpio_states_mux);
-
-        if (prev_mode == BLEIO_MODE_OUTPUT_HIGH)
-        {
-            gpio_set_level(pin, 1);
-            ESP_LOGI(TAG, "Set GPIO%d to OUTPUT (maintain HIGH)", pin);
-        }
-        else
-        {
-            gpio_set_level(pin, 0);
-            portENTER_CRITICAL(&gpio_states_mux);
-            state->mode = BLEIO_MODE_OUTPUT_LOW;
-            portEXIT_CRITICAL(&gpio_states_mux);
-            ESP_LOGI(TAG, "Set GPIO%d to OUTPUT (set to LOW)", pin);
-        }
-        break;
     case CMD_SET_INPUT_FLOATING:
         io_conf.mode = GPIO_MODE_INPUT;
         gpio_config(&io_conf);
@@ -840,15 +819,15 @@ static esp_err_t gpio_write_level(uint8_t pin, uint8_t command)
 
     switch (command)
     {
-    case CMD_WRITE_LOW:
+    case CMD_SET_OUTPUT_LOW:
         level = 0;
         new_mode = BLEIO_MODE_OUTPUT_LOW;
-        ESP_LOGI(TAG, "Write GPIO%d to LOW", pin);
+        ESP_LOGI(TAG, "Set GPIO%d to OUTPUT_LOW", pin);
         break;
-    case CMD_WRITE_HIGH:
+    case CMD_SET_OUTPUT_HIGH:
         level = 1;
         new_mode = BLEIO_MODE_OUTPUT_HIGH;
-        ESP_LOGI(TAG, "Write GPIO%d to HIGH", pin);
+        ESP_LOGI(TAG, "Set GPIO%d to OUTPUT_HIGH", pin);
         break;
     default:
         ESP_LOGE(TAG, "Invalid write command: %d", command);
@@ -889,13 +868,13 @@ static esp_err_t gpio_start_blink(uint8_t pin, uint8_t command)
 
     switch (command)
     {
-    case CMD_BLINK_250MS:
+    case CMD_SET_OUTPUT_BLINK_250MS:
         new_mode = BLEIO_MODE_BLINK_250MS;
-        ESP_LOGI(TAG, "Start GPIO%d blinking at 250ms", pin);
+        ESP_LOGI(TAG, "Set GPIO%d to OUTPUT_BLINK_250MS", pin);
         break;
-    case CMD_BLINK_500MS:
+    case CMD_SET_OUTPUT_BLINK_500MS:
         new_mode = BLEIO_MODE_BLINK_500MS;
-        ESP_LOGI(TAG, "Start GPIO%d blinking at 500ms", pin);
+        ESP_LOGI(TAG, "Set GPIO%d to OUTPUT_BLINK_500MS", pin);
         break;
     default:
         ESP_LOGE(TAG, "Invalid blink command: %d", command);
@@ -908,6 +887,30 @@ static esp_err_t gpio_start_blink(uint8_t pin, uint8_t command)
     portEXIT_CRITICAL(&gpio_states_mux);
 
     gpio_set_level(pin, 0);
+    return ESP_OK;
+}
+
+static esp_err_t gpio_set_disconnect_behavior(uint8_t pin, uint8_t behavior)
+{
+    if (!is_valid_gpio(pin))
+    {
+        ESP_LOGE(TAG, "Invalid GPIO pin: %d", pin);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (behavior > 2)
+    {
+        ESP_LOGE(TAG, "Invalid disconnect behavior: %d (0-2)", behavior);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    portENTER_CRITICAL(&gpio_states_mux);
+    gpio_states[pin].disconnect_behavior = behavior;
+    portEXIT_CRITICAL(&gpio_states_mux);
+
+    const char *behavior_str = (behavior == 0) ? "維持" : (behavior == 1) ? "LOW" : "HIGH";
+    ESP_LOGI(TAG, "GPIO%d の切断時の振る舞いを設定: %s", pin, behavior_str);
+
     return ESP_OK;
 }
 
@@ -959,21 +962,25 @@ static int gatt_svr_chr_write_cb(uint16_t conn_handle, uint16_t attr_handle,
                  i + 1, pin, command, param1, param2);
 
         esp_err_t ret;
-        if (command <= CMD_SET_INPUT_PULLDOWN)
-        {
-            ret = gpio_set_mode(pin, command, param1); // param1 = latch_mode
-        }
-        else if (command == CMD_WRITE_LOW || command == CMD_WRITE_HIGH)
+        if (command == CMD_SET_OUTPUT_LOW || command == CMD_SET_OUTPUT_HIGH)
         {
             ret = gpio_write_level(pin, command);
         }
-        else if (command == CMD_BLINK_500MS || command == CMD_BLINK_250MS)
+        else if (command == CMD_SET_OUTPUT_BLINK_250MS || command == CMD_SET_OUTPUT_BLINK_500MS)
         {
             ret = gpio_start_blink(pin, command);
         }
-        else if (command == CMD_SET_PWM)
+        else if (command == CMD_SET_OUTPUT_PWM)
         {
             ret = gpio_set_pwm(pin, param1, param2); // param1 = duty_cycle, param2 = freq_preset
+        }
+        else if (command == CMD_SET_OUTPUT_ON_DISCONNECT)
+        {
+            ret = gpio_set_disconnect_behavior(pin, param1); // param1 = disconnect_behavior
+        }
+        else if (command >= CMD_SET_INPUT_FLOATING && command <= CMD_SET_INPUT_PULLDOWN)
+        {
+            ret = gpio_set_mode(pin, command, param1); // param1 = latch_mode
         }
         else if (command == CMD_SET_ADC_ENABLE)
         {
@@ -1170,6 +1177,41 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
     case BLE_GAP_EVENT_DISCONNECT:
         ESP_LOGI(TAG, "BLE disconnect; reason=%d", event->disconnect.reason);
         conn_handle = 0;
+
+        // 切断時の振る舞いに従って GPIO を設定
+        for (int pin = 0; pin < 40; pin++)
+        {
+            if (!is_valid_gpio(pin))
+            {
+                continue;
+            }
+
+            portENTER_CRITICAL(&gpio_states_mux);
+            bleio_mode_state_t mode = gpio_states[pin].mode;
+            uint8_t disconnect_behavior = gpio_states[pin].disconnect_behavior;
+            portEXIT_CRITICAL(&gpio_states_mux);
+
+            // 出力モードかつ切断時の振る舞いが設定されている場合
+            if ((mode == BLEIO_MODE_OUTPUT_LOW || mode == BLEIO_MODE_OUTPUT_HIGH ||
+                 mode == BLEIO_MODE_BLINK_250MS || mode == BLEIO_MODE_BLINK_500MS ||
+                 mode == BLEIO_MODE_PWM) &&
+                disconnect_behavior != 0)
+            {
+                if (disconnect_behavior == 1)
+                {
+                    // LOW に設定
+                    gpio_write_level(pin, CMD_SET_OUTPUT_LOW);
+                    ESP_LOGI(TAG, "切断したため GPIO%d を LOW に設定しました", pin);
+                }
+                else if (disconnect_behavior == 2)
+                {
+                    // HIGH に設定
+                    gpio_write_level(pin, CMD_SET_OUTPUT_HIGH);
+                    ESP_LOGI(TAG, "切断したため GPIO%d を HIGH に設定しました", pin);
+                }
+            }
+        }
+
         // 再度アドバタイズを開始
         ble_app_advertise();
         break;
