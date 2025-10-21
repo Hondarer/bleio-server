@@ -10,6 +10,7 @@
 #include "esp_adc/adc_oneshot.h"
 #include "esp_adc/adc_cali.h"
 #include "esp_adc/adc_cali_scheme.h"
+#include "esp_bt.h"
 
 #include "host/ble_hs.h"
 #include "host/ble_uuid.h"
@@ -869,7 +870,9 @@ static esp_err_t gpio_write_level(uint8_t pin, uint8_t command)
     io_conf.mode = GPIO_MODE_OUTPUT;
     io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
     io_conf.pull_up_en = GPIO_PULLUP_DISABLE;
+    io_conf.intr_type = GPIO_INTR_DISABLE;
     gpio_config(&io_conf);
+    gpio_set_drive_capability(pin, GPIO_DRIVE_CAP_2);
 
     bleio_gpio_state_t *state = &gpio_states[pin];
     uint32_t level;
@@ -919,7 +922,9 @@ static esp_err_t gpio_start_blink(uint8_t pin, uint8_t command)
     io_conf.mode = GPIO_MODE_OUTPUT;
     io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
     io_conf.pull_up_en = GPIO_PULLUP_DISABLE;
+    io_conf.intr_type = GPIO_INTR_DISABLE;
     gpio_config(&io_conf);
+    gpio_set_drive_capability(pin, GPIO_DRIVE_CAP_2);
 
     bleio_gpio_state_t *state = &gpio_states[pin];
     bleio_mode_state_t new_mode;
@@ -1230,6 +1235,19 @@ static int ble_gap_event(struct ble_gap_event *event, void *arg)
         if (event->connect.status == 0)
         {
             conn_handle = event->connect.conn_handle;
+
+            // 接続パラメータを更新して電力変動を抑制
+            // より長い Connection Interval を使用することで電力ピークを分散
+            struct ble_gap_upd_params params = {
+                .itvl_min = BLE_GAP_INITIAL_CONN_ITVL_MAX,  // 30ms
+                .itvl_max = BLE_GAP_INITIAL_CONN_ITVL_MAX,  // 30ms
+                .latency = 0,
+                .supervision_timeout = 500,  // 5000ms
+                .min_ce_len = BLE_GAP_INITIAL_CONN_MIN_CE_LEN,
+                .max_ce_len = BLE_GAP_INITIAL_CONN_MAX_CE_LEN,
+            };
+            ble_gap_update_params(conn_handle, &params);
+            ESP_LOGI(TAG, "Updated connection parameters for stable power consumption");
         }
         break;
     case BLE_GAP_EVENT_DISCONNECT:
@@ -1460,6 +1478,16 @@ void app_main(void)
 
     // NimBLE 初期化
     ESP_ERROR_CHECK(nimble_port_init());
+
+    // BLE 送信電力を設定 (電力変動を抑制)
+    // ESP_PWR_LVL_N12 ~ ESP_PWR_LVL_P9 の範囲で設定可能
+    // ESP_PWR_LVL_P3 (3dBm) 程度が安定性と到達距離のバランスが良い
+    esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_ADV, ESP_PWR_LVL_P3);
+    esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_CONN_HDL0, ESP_PWR_LVL_P3);
+    esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_CONN_HDL1, ESP_PWR_LVL_P3);
+    esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_SCAN, ESP_PWR_LVL_P3);
+    esp_ble_tx_power_set(ESP_BLE_PWR_TYPE_DEFAULT, ESP_PWR_LVL_P3);
+    ESP_LOGI(TAG, "BLE TX power set to +3dBm for stable power consumption");
 
     // GATT サービス初期化
     ble_hs_cfg.sync_cb = ble_app_on_sync;
